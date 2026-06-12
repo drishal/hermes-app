@@ -712,6 +712,19 @@ Item {
             readonly property bool streaming: msg ? !!msg.isStreaming : false
             readonly property string contentText: msg ? (msg.content || "") : ""
             readonly property bool hasContent: contentText.length > 0
+            // Peek at the most recent thinking row above this assistant row
+            // so we can show the live reasoning text instead of a static
+            // "Hermes is thinking…" label while streaming.
+            readonly property string liveThinkingText: {
+                if (!streaming) return ""
+                const ml = hermesService.messageList
+                for (let i = rowIndex - 1; i >= 0; --i) {
+                    const m = ml.get(i)
+                    if (m.type === "thinking") return m.content || ""
+                    if (m.type !== "tool_call" && m.type !== "tool_result") break
+                }
+                return ""
+            }
             readonly property real msgDuration: msg ? (msg.duration || 0) : 0
             readonly property int msgTotalTokens: msg && msg.usage ? (msg.usage.total_tokens || 0) : 0
             readonly property int msgInTokens: msg && msg.usage ? (msg.usage.input_tokens || 0) : 0
@@ -736,13 +749,18 @@ Item {
                     anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.topMargin: 2
-                    implicitHeight: amc.streaming && !amc.hasContent
-                        ? thinkingIndicator.height
-                        : messageContent.implicitHeight + (amc.streaming ? cursorDot.height + 2 : 0)
+                    implicitHeight: {
+                        if (amc.streaming && !amc.hasContent) {
+                            if (amc.liveThinkingText)
+                                return liveThinkingDisplay.height
+                            return thinkingIndicator.height
+                        }
+                        return messageContent.implicitHeight + (amc.streaming ? cursorDot.height + 2 : 0)
+                    }
 
                     Row {
                         id: thinkingIndicator
-                        visible: amc.streaming && !amc.hasContent
+                        visible: amc.streaming && !amc.hasContent && !amc.liveThinkingText
                         spacing: Theme.spacingXS
                         anchors.left: parent.left
 
@@ -767,6 +785,74 @@ Item {
                             font.pixelSize: Theme.fontSizeMedium
                             font.italic: true
                             anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+
+                    // Live reasoning text — shows the thinking card content inline
+                    // while the assistant is streaming but hasn't produced visible
+                    // content yet. Replaces the static "Hermes is thinking…" label
+                    // with the actual reasoning trace, matching the webui's live
+                    // thinking card behavior.
+                    Column {
+                        id: liveThinkingDisplay
+                        visible: amc.streaming && !amc.hasContent && amc.liveThinkingText.length > 0
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        spacing: 0
+
+                        Row {
+                            spacing: Theme.spacingXS
+
+                            DankIcon {
+                                name: "lightbulb"
+                                size: 13
+                                color: Theme.primary
+                                opacity: 0.7
+                                anchors.verticalCenter: parent.verticalCenter
+
+                                SequentialAnimation on opacity {
+                                    running: liveThinkingDisplay.visible
+                                    loops: Animation.Infinite
+                                    NumberAnimation { from: 0.55; to: 1; duration: 700; easing.type: Easing.InOutSine }
+                                    NumberAnimation { from: 1; to: 0.55; duration: 700; easing.type: Easing.InOutSine }
+                                }
+                            }
+
+                            StyledText {
+                                text: "Thinking…"
+                                color: Theme.primary
+                                opacity: 0.85
+                                font.pixelSize: Theme.fontSizeSmall
+                                font.weight: Font.DemiBold
+                            }
+                        }
+
+                        Flickable {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            height: Math.min(thinkingLiveText.implicitHeight + 4, 200)
+                            contentWidth: width
+                            contentHeight: thinkingLiveText.implicitHeight
+                            clip: true
+                            flickableDirection: Flickable.VerticalFlick
+                            interactive: contentHeight > height
+                            boundsBehavior: Flickable.StopAtBounds
+                            onContentHeightChanged: contentY = Math.max(0, contentHeight - height)
+
+                            TextEdit {
+                                id: thinkingLiveText
+                                width: parent.width
+                                text: amc.liveThinkingText
+                                color: Theme.surfaceTextMedium
+                                font.pixelSize: Theme.fontSizeSmall - 1
+                                font.family: "monospace"
+                                wrapMode: TextEdit.Wrap
+                                textFormat: TextEdit.PlainText
+                                readOnly: true
+                                selectByMouse: true
+                                selectionColor: Theme.primary
+                                selectedTextColor: Theme.onPrimary
+                            }
                         }
                     }
 
