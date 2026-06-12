@@ -454,9 +454,13 @@ class HermesBackend(QObject):
 
         # ── Reasoning / thinking ────────────────────────────────
         # /v1/runs sends "reasoning.available" with {"text": "..."}
-        # /api/chat/stream sends "tool.progress" with {"tool_name": "_thinking", "delta": "..."}
+        # /api/chat/stream sends "reasoning" with {"text": "..."} (the
+        # webui's put('reasoning', ...) path) or "tool.progress" with
+        # {"tool_name": "_thinking", "delta": "..."}
         elif event_name == "reasoning.available":
             self._add_thinking(data.get("text") or "")
+        elif event_name == "reasoning":
+            self._add_thinking(data.get("text") or data.get("delta") or "", delta=True)
         elif event_name == "tool.progress" and data.get("tool_name") == "_thinking":
             self._add_thinking(data.get("delta") or "", delta=True)
 
@@ -552,20 +556,21 @@ class HermesBackend(QObject):
     def _add_thinking(self, text: str, delta: bool = False) -> None:
         if not text:
             return
-        # Provider quirk: some models (M3/GLM-style) echo each just-streamed
-        # segment back through the reasoning channel, so reasoning.available
-        # arrives carrying text we already rendered as visible content. Drop the
-        # echo — otherwise every assistant message gets a duplicate "thinking"
-        # row. Genuine reasoning (text that wasn't shown as content) still shows.
-        norm = " ".join(text.split())
-        if norm:
-            with self._lock:
-                for m in reversed(self._messages):
-                    if m["type"] == "assistant" and m.get("content"):
-                        c = " ".join(m["content"].split())
-                        if c == norm or c.startswith(norm) or norm.startswith(c):
-                            return
-                        break
+        # Deduplicate reasoning echoes for the /v1/runs path where
+        # "reasoning.available" can carry text already shown as content.
+        # The /api/chat/stream "reasoning" event is already deduped by
+        # the server's _is_visible_output_echo(), so skip the check for
+        # delta-style events (which come from the "reasoning" SSE path).
+        if not delta:
+            norm = " ".join(text.split())
+            if norm:
+                with self._lock:
+                    for m in reversed(self._messages):
+                        if m["type"] == "assistant" and m.get("content"):
+                            c = " ".join(m["content"].split())
+                            if c == norm or c.startswith(norm) or norm.startswith(c):
+                                return
+                            break
         # Accumulate a contiguous reasoning stream into one row (one card),
         # the same way the webui grows a single live thinking card. A new row
         # starts only after something else (content, a tool call) interleaves.
