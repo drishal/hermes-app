@@ -26,6 +26,7 @@ from PySide6.QtCore import (
 )
 
 from . import db, welcome
+from .acp_client import AcpClient, AcpError
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,10 @@ DEFAULTS = {
     "apiKey": "",
     "hermesHome": "~/.hermes",
     "selectedModel": "",
+    # ACP is the primary run transport (live thinking + tool streaming); the
+    # gateway /v1/runs SSE path remains as automatic fallback when the
+    # hermes-acp binary is missing or fails to start.
+    "acpCommand": "hermes-acp",
 }
 
 
@@ -71,7 +76,19 @@ class HermesBackend(QObject):
         self._apiKey = s["apiKey"]
         self._hermesHome = s["hermesHome"]
         self._selectedModel = s["selectedModel"]
+        self._acpCommand = s["acpCommand"]
         self._envApiKey = ""
+
+        # ACP run transport (lazily spawned on first send)
+        self._acp: AcpClient | None = None
+        self._acpLoadedSessions: set[str] = set()
+        self._acpReplaying = False      # suppress session/load history replay
+        self._acpRunSession = ""        # session id of the in-flight ACP run
+        self._pendingPermission = None  # (request_id, options) awaiting the user
+        # Sessions whose client-side view was truncated (edit/retry). The ACP
+        # agent keeps the full server-side history, so these must run through
+        # the gateway path, which replays conversation_history explicitly.
+        self._divergedSessions: set[str] = set()
 
         # Runtime state
         self._connected = False
@@ -134,6 +151,7 @@ class HermesBackend(QObject):
                         "apiKey": self._apiKey,
                         "hermesHome": self._hermesHome,
                         "selectedModel": self._selectedModel,
+                        "acpCommand": self._acpCommand,
                     },
                     f,
                     indent=2,
@@ -211,17 +229,21 @@ class HermesBackend(QObject):
         self._spawn(self._do_health)
 
     def _do_health(self) -> None:
+        ok = False
         try:
             r = self._client.get(
                 self._apiBaseUrl + "/health", headers=self._headers(), timeout=3.0
             )
             data = r.json()
             ok = data.get("status") in ("ok", "healthy")
-            self._set_connected(ok)
-            if data.get("model"):
+            if data.get("model") and not (self._acp and self._acp.is_alive()):
                 self._set_current_model(data["model"])
         except Exception:
-            self._set_connected(False)
+            pass
+        # A live ACP subprocess can run turns without the gateway.
+        if not ok and self._acp is not None and self._acp.is_alive():
+            ok = True
+        self._set_connected(ok)
 
     # ───────────────────────────────────────────────────────────
     #  Sessions / messages (sqlite)
@@ -275,6 +297,8 @@ class HermesBackend(QObject):
                 return
             self._messages = self._messages[:row]
             snapshot = list(self._messages)
+        if self._currentSessionId:
+            self._divergedSessions.add(self._currentSessionId)
         self.messagesReset.emit(snapshot)
 
     @Slot(int, str)
@@ -288,6 +312,8 @@ class HermesBackend(QObject):
                 return
             self._messages = self._messages[:row]
             snapshot = list(self._messages)
+        if self._currentSessionId:
+            self._divergedSessions.add(self._currentSessionId)
         self.messagesReset.emit(snapshot)
         self.sendMessage(text)
 
@@ -335,7 +361,8 @@ class HermesBackend(QObject):
         if self._selectedModel:
             body["model"] = self._selectedModel
 
-        self._spawn(lambda: self._do_run(body))
+        # ACP first (live thinking/tool streaming); gateway SSE as fallback.
+        self._spawn(lambda: self._do_run_acp(text, body))
 
     def _do_run(self, body: dict) -> None:
         try:
@@ -366,6 +393,230 @@ class HermesBackend(QObject):
         self._set_running(True)
         self._gui(self.runStarted.emit)
         self._stream_events(run_id)
+
+    # ───────────────────────────────────────────────────────────
+    #  ACP run path (primary) — hermes-acp subprocess, JSON-RPC stdio
+    # ───────────────────────────────────────────────────────────
+    def _ensure_acp(self) -> AcpClient:
+        if self._acp is None:
+            self._acp = AcpClient(
+                command=self._acpCommand,
+                on_update=self._on_acp_update,
+                on_permission=self._on_acp_permission,
+            )
+        if not self._acp.is_alive():
+            # Fresh process knows none of our previously loaded sessions.
+            self._acpLoadedSessions.clear()
+            self._acp.start()
+        return self._acp
+
+    def _do_run_acp(self, text: str, fallback_body: dict) -> None:
+        """Run one turn over ACP. Falls back to the gateway SSE path when the
+        hermes-acp subprocess can't start, or when an existing session can't
+        be attached (the gateway path replays conversation_history itself)."""
+        sid = self._currentSessionId
+        if sid and sid in self._divergedSessions:
+            self._do_run(fallback_body)
+            return
+        try:
+            client = self._ensure_acp()
+        except (AcpError, OSError) as e:
+            log.warning("ACP unavailable (%s) — falling back to gateway", e)
+            self._do_run(fallback_body)
+            return
+        try:
+            if sid and sid not in self._acpLoadedSessions:
+                try:
+                    self._acpReplaying = True
+                    client.load_session(sid)
+                finally:
+                    self._acpReplaying = False
+                self._acpLoadedSessions.add(sid)
+            elif not sid:
+                res = client.new_session()
+                sid = res.get("sessionId") or ""
+                if not sid:
+                    raise AcpError("session/new returned no sessionId")
+                self._acpLoadedSessions.add(sid)
+                self._set_current_session(sid)
+                self._apply_acp_models(client, sid, res.get("models") or {})
+        except AcpError as e:
+            log.warning("ACP session setup failed (%s) — falling back to gateway", e)
+            self._do_run(fallback_body)
+            return
+
+        self._acpRunSession = sid
+        self._accepting = True
+        self._set_running(True)
+        self._gui(self.runStarted.emit)
+        try:
+            result = client.prompt(sid, text)
+        except AcpError as e:
+            if self._acpRunSession == sid:  # not detached meanwhile
+                self._acpRunSession = ""
+                self._fail_pending(str(e))
+            return
+        # A session switch mid-run detaches us: results were already ignored,
+        # and a newer run may own the state now — touch nothing.
+        if self._acpRunSession != sid:
+            return
+        self._acpRunSession = ""
+        self._accepting = False
+        stop = result.get("stopReason") or ""
+        if stop in ("cancelled", "canceled"):
+            self._cancel_run()
+            return
+        usage = result.get("usage") or {}
+        event = {
+            "output": self._last_assistant_text(),
+            "usage": {
+                "input_tokens": usage.get("inputTokens") or 0,
+                "output_tokens": usage.get("outputTokens") or 0,
+                "total_tokens": usage.get("totalTokens") or 0,
+            } if usage else {},
+        }
+        if stop == "refusal" or stop.startswith("error"):
+            self._fail_run(f"Run stopped: {stop}")
+            return
+        self._finalize_run(event)
+
+    def _apply_acp_models(self, client: AcpClient, sid: str, models: dict) -> None:
+        """Reflect the agent's current model in the UI; honour selectedModel."""
+        current = models.get("currentModelId") or ""
+        available = models.get("availableModels") or []
+        if self._selectedModel and self._selectedModel != current:
+            # Accept either the full modelId or the bare display name.
+            for m in available:
+                if self._selectedModel in (m.get("modelId"), m.get("name")):
+                    try:
+                        client.set_model(sid, m["modelId"])
+                        current = m["modelId"]
+                    except AcpError as e:
+                        log.warning("session/set_model failed: %s", e)
+                    break
+        if current:
+            self._set_current_model(current.split(":")[-1])
+
+    def _last_assistant_text(self) -> str:
+        with self._lock:
+            for m in reversed(self._messages):
+                if m["type"] == "assistant":
+                    return m.get("content") or ""
+        return ""
+
+    # ── ACP callbacks (fire on the AcpClient reader thread) ────
+    def _on_acp_update(self, session_id: str, update: dict) -> None:
+        if self._acpReplaying or not self._accepting:
+            return
+        if session_id != self._acpRunSession:
+            return
+        kind = update.get("sessionUpdate") or ""
+        if kind == "agent_thought_chunk":
+            self._add_thinking(self._acp_text(update.get("content")), delta=True)
+        elif kind == "agent_message_chunk":
+            self._append_delta(self._acp_text(update.get("content")))
+        elif kind == "tool_call":
+            self._acp_tool_call(update)
+        elif kind == "tool_call_update":
+            self._acp_tool_update(update)
+        # usage_update / available_commands_update / plan: no UI yet
+
+    @staticmethod
+    def _acp_text(content) -> str:
+        """Extract plain text from an ACP ContentBlock (or list of them)."""
+        if isinstance(content, list):
+            return "".join(HermesBackend._acp_text(c) for c in content)
+        if isinstance(content, dict):
+            if content.get("type") == "content":
+                return HermesBackend._acp_text(content.get("content"))
+            return content.get("text") or ""
+        return ""
+
+    def _acp_tool_call(self, update: dict) -> None:
+        title = update.get("title") or update.get("kind") or "tool"
+        # "terminal: echo hi" → chip "terminal", preview "echo hi"
+        tool, _, rest = title.partition(": ")
+        preview = self._acp_text(update.get("content")) or rest
+        args = update.get("rawInput") if isinstance(update.get("rawInput"), dict) else None
+        self._add_tool_call(tool or title, preview, "running", args)
+        call_id = update.get("toolCallId") or ""
+        if call_id:
+            with self._lock:
+                for m in reversed(self._messages):
+                    if m["type"] == "tool_call" and m["toolStatus"] == "running":
+                        m["toolCallId"] = call_id
+                        break
+
+    def _acp_tool_update(self, update: dict) -> None:
+        call_id = update.get("toolCallId") or ""
+        status = update.get("status") or ""
+        mapped = {"completed": "completed", "failed": "error"}.get(status, "running")
+        result_text = self._acp_text(update.get("content"))
+        with self._lock:
+            for i in range(len(self._messages) - 1, -1, -1):
+                m = self._messages[i]
+                if m["type"] != "tool_call":
+                    continue
+                if call_id and m.get("toolCallId") != call_id:
+                    continue
+                if not call_id and m["toolStatus"] != "running":
+                    continue
+                props = {}
+                if result_text:
+                    prior = m.get("toolPreview") or ""
+                    m["toolPreview"] = f"{prior}\n{result_text}" if prior else result_text
+                    props["toolPreview"] = m["toolPreview"]
+                if mapped != "running" and m["toolStatus"] == "running":
+                    m["toolStatus"] = mapped
+                    m["toolDuration"] = max(0.0, time.time() - (m.get("timestamp") or time.time()))
+                    props["toolStatus"] = mapped
+                    props["toolDuration"] = m["toolDuration"]
+                if props:
+                    self._gui(lambda i=i, p=props: self.messageUpdated.emit(i, p))
+                return
+
+    def _on_acp_permission(self, request_id, session_id: str, params: dict) -> None:
+        if session_id != self._acpRunSession or not self._accepting:
+            # Not our run — refuse rather than leaving the agent blocked.
+            try:
+                self._acp.respond_permission(request_id, None)
+            except AcpError:
+                pass
+            return
+        self._pendingPermission = (request_id, params.get("options") or [])
+        tool_call = params.get("toolCall") or {}
+        desc = tool_call.get("title") or self._acp_text(tool_call.get("content")) \
+            or "Approval requested"
+        self._add_approval({"command": desc})
+
+    def _resolve_acp_permission(self, choice: str) -> bool:
+        """Map the approval card's once/session/deny onto the request's
+        options. Returns True when an ACP permission was pending."""
+        if self._pendingPermission is None:
+            return False
+        request_id, options = self._pendingPermission
+        self._pendingPermission = None
+        wanted = {
+            "once": ["allow_once", "allow_always"],
+            "session": ["allow_always", "allow_once"],
+            "always": ["allow_always", "allow_once"],
+            "deny": ["reject_once", "reject_always"],
+        }.get(choice, ["reject_once", "reject_always"])
+        option_id = None
+        for kind in wanted:
+            for o in options:
+                if o.get("kind") == kind:
+                    option_id = o.get("optionId")
+                    break
+            if option_id:
+                break
+        if option_id is None and options:
+            option_id = options[0].get("optionId")
+        try:
+            self._acp.respond_permission(request_id, option_id)
+        except AcpError as e:
+            log.warning("permission response failed: %s", e)
+        return True
 
     def _conversation_history(self) -> list[dict]:
         out = []
@@ -533,18 +784,27 @@ class HermesBackend(QObject):
                 idx = len(self._messages) - 1
                 last = self._messages[idx]
                 if last["type"] == "assistant" and last.get("isStreaming"):
+                    if not last["content"]:
+                        delta = delta.lstrip("\n")
                     last["content"] += delta
                     content = last["content"]  # snapshot for closure
                     self._gui(lambda i=idx, c=content: self.messageUpdated.emit(i, {"content": c}))
                     return
             for i in range(len(self._messages) - 1, -1, -1):
                 if self._messages[i].get("isStreaming"):
-                    self._messages[i]["isStreaming"] = False
-                    self._gui(lambda i=i: self.messageUpdated.emit(i, {"isStreaming": False}))
+                    m = self._messages[i]
+                    m["isStreaming"] = False
+                    props = {"isStreaming": False}
+                    # An empty placeholder superseded by a later bubble would
+                    # render nothing but its timestamp line — hide it.
+                    if m["type"] == "assistant" and not m.get("content"):
+                        m["timestamp"] = 0
+                        props["timestamp"] = 0
+                    self._gui(lambda i=i, p=props: self.messageUpdated.emit(i, p))
         self._append(
             db._row(
                 "assistant",
-                content=delta,
+                content=delta.lstrip("\n"),
                 isStreaming=True,
                 timestamp=time.time(),
                 startedAt=time.time(),
@@ -699,6 +959,20 @@ class HermesBackend(QObject):
     # ───────────────────────────────────────────────────────────
     @Slot()
     def stopRun(self) -> None:
+        # ACP run: unblock any pending permission, cancel the session. The
+        # blocked prompt() then returns stopReason=cancelled; we seal now so
+        # the UI reacts immediately.
+        if self._acpRunSession:
+            self._accepting = False
+            if self._pendingPermission is not None:
+                request_id, _ = self._pendingPermission
+                self._pendingPermission = None
+                self._spawn(lambda: self._acp_quiet(
+                    lambda: self._acp.respond_permission(request_id, None)))
+            sid = self._acpRunSession
+            self._spawn(lambda: self._acp_quiet(lambda: self._acp.cancel(sid)))
+            self._cancel_run()
+            return
         if not self._currentRunId:
             return
         run_id = self._currentRunId
@@ -711,6 +985,10 @@ class HermesBackend(QObject):
 
     @Slot(str)
     def resolveApproval(self, choice: str) -> None:
+        if self._pendingPermission is not None:
+            choice_ = choice
+            self._spawn(lambda: self._resolve_acp_permission(choice_))
+            return
         if not self._currentRunId:
             return
         run_id = self._currentRunId
@@ -732,10 +1010,25 @@ class HermesBackend(QObject):
         except Exception:
             pass
 
+    @staticmethod
+    def _acp_quiet(fn) -> None:
+        try:
+            fn()
+        except (AcpError, OSError):
+            pass
+
     def _detach_run(self) -> None:
         """Stop listening to the current run without cancelling it server-side."""
         self._accepting = False
         self._sseStop.set()
+        # A permission request left unanswered would block the detached agent
+        # forever — refuse it so the background run can finish and persist.
+        if self._pendingPermission is not None:
+            request_id, _ = self._pendingPermission
+            self._pendingPermission = None
+            self._spawn(lambda: self._acp_quiet(
+                lambda: self._acp.respond_permission(request_id, None)))
+        self._acpRunSession = ""
         self._set_running(False)
         self._set_current_run("")
 

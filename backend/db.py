@@ -39,7 +39,6 @@ def load_sessions(db_path: str, limit: int = 30) -> list[dict]:
                 s.message_count
             FROM sessions s
             WHERE s.message_count > 0
-              AND COALESCE(s.source, '') != 'acp'
             ORDER BY s.started_at DESC
             LIMIT ?
             """,
@@ -139,6 +138,9 @@ def _row(msg_type: str, **kw) -> dict:
         "toolArgs": "",
         "toolStatus": "",
         "toolDuration": 0,
+        # ACP tool-call correlation id (Python-side matching only; QML never
+        # binds it, but every row must carry the full role set regardless).
+        "toolCallId": "",
         "isStreaming": False,
         "timestamp": 0,
         # Disclosure state for the collapsible cards (thinking / tool_call /

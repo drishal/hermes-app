@@ -23,9 +23,10 @@ QML views ──bind──► ListModels ──mirrored by──► HermesServic
                                                       ▲ signals
                                                       │
                                           HermesBackend (Python QObject)
-                                                      │ httpx / sqlite3
-                                                      ▼
-                                          Hermes gateway + ~/.hermes DB
+                                            │ stdio JSON-RPC │ sqlite3 / httpx
+                                            ▼               ▼
+                                      hermes-acp     ~/.hermes DB + gateway
+                                      (runs)         (history + run fallback)
 ```
 
 - **`HermesBackend`** (`backend/hermes_backend.py`) owns all I/O and state. It
@@ -44,28 +45,40 @@ QML views ──bind──► ListModels ──mirrored by──► HermesServic
   `db._row`). `type` selects the delegate in `ChatArea.qml`'s `Loader`:
   `user | assistant | thinking | tool_call | tool_result | approval`.
 
-### Gateway surface
+### Run transport: ACP primary, gateway fallback
 
 History (`sessionList`, `messageList`) is read **directly from the Hermes
-sqlite DB** under `hermesHome`; only runs use HTTP:
+sqlite DB** under `hermesHome`. Runs go over **ACP** (Agent Client Protocol):
+`backend/acp_client.py` spawns the `hermes-acp` binary (settings key
+`acpCommand`) and speaks newline-delimited JSON-RPC on its stdio —
+`initialize` → `session/new`-or-`session/load` → `session/prompt` (blocks for
+the turn), `session/cancel` to stop.
 
-| Call | Endpoint |
-|------|----------|
-| health check | `GET /health` |
-| send message | `POST /v1/runs` |
-| stream events | `GET /v1/runs/{id}/events` (SSE) |
-| stop | `POST /v1/runs/{id}/stop` |
-| resolve approval | `POST /v1/runs/{id}/approval` |
+ACP is the *only* hermes surface that streams reasoning live: the gateway's
+`/v1/runs` never registers the agent's `reasoning_callback`, so thinking
+tokens die in-process there and `reasoning.available` only fires post-hoc.
 
-Auth: `Authorization: Bearer <key>` on everything except `/health`, where the
-key is the Settings field or `API_SERVER_KEY` from `~/.hermes/.env`.
+**`session/update` notifications handled** (`_on_acp_update`):
+`agent_thought_chunk` → thinking row (delta-accumulated per phase),
+`agent_message_chunk` → assistant delta, `tool_call` → tool row (correlated by
+`toolCallId`; title `"name: preview"` is split for the chip),
+`tool_call_update` → status/result (result text appends below the command
+preview). `session/request_permission` (a JSON-RPC *request*) becomes the
+approval row; the card's once/session/deny is mapped onto the request's
+option kinds (`allow_once`/`allow_always`/`reject_*`) and answered by id.
 
-**SSE events handled** (`_handle_event`): `message.delta` `{delta}`,
-`reasoning.available` `{text}`, `tool.progress` `{tool_name:"_thinking",delta}`,
-`tool.started` `{tool,preview}`, `tool.completed` `{tool,duration,error}`,
-`tool.failed`, `approval.request`, `run.completed` `{usage}`,
-`run.failed`/`error`, `run.cancelled`. (`/api/chat/stream` event names are also
-tolerated for compatibility.)
+Update routing is gated on `_accepting` and `_acpRunSession` — `session/load`
+history replay and updates for detached/foreign sessions are dropped. A
+truncated session (edit/retry) is marked *diverged* and runs through the
+gateway instead, because the ACP agent keeps the full server-side history
+while the gateway path replays `conversation_history` explicitly.
+
+The old gateway path (`POST /v1/runs` + SSE `GET /v1/runs/{id}/events`,
+`_handle_event`) is kept as automatic fallback when `hermes-acp` is missing
+or a session can't be attached. `GET /health` still drives the connected dot
+(a live ACP process also counts). Auth for the HTTP calls:
+`Authorization: Bearer <key>` — the Settings field or `API_SERVER_KEY` from
+`~/.hermes/.env`.
 
 ## Threading & process model
 
@@ -156,7 +169,11 @@ There's no display in CI / headless shells; use Qt's offscreen platform.
 
 ```bash
 QT_QPA_PLATFORM=offscreen python3 tests/smoke_test.py
+QT_QPA_PLATFORM=offscreen python3 tests/acp_test.py   # ACP client + row mapping
 ```
+
+`tests/acp_test.py` drives `AcpClient` against a fake `hermes-acp` subprocess
+(real pipes/framing, no model) and the backend's update→row mapping directly.
 
 The smoke test loads the full QML tree against stub context properties and fails
 on any QML warning or load error. For layout work, the effective pattern is a
