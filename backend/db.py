@@ -136,6 +136,7 @@ def _row(msg_type: str, **kw) -> dict:
         "content": "",
         "tool": "",
         "toolPreview": "",
+        "toolArgs": "",
         "toolStatus": "",
         "toolDuration": 0,
         "isStreaming": False,

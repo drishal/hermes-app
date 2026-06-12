@@ -460,12 +460,32 @@ class HermesBackend(QObject):
         elif event_name == "tool.progress" and data.get("tool_name") == "_thinking":
             self._add_thinking(data.get("delta") or "", delta=True)
 
+        # ── Non-thinking tool progress (live output) ───────────────
+        # Some gateways send tool.progress for running tools with partial
+        # output (e.g. terminal commands). Append the delta to the most
+        # recent running tool_call's preview so the QML can show it live.
+        elif event_name == "tool.progress":
+            tool_name = data.get("tool") or data.get("tool_name") or ""
+            if tool_name and tool_name != "_thinking":
+                delta_text = data.get("delta") or data.get("preview") or ""
+                if delta_text:
+                    with self._lock:
+                        for m in reversed(self._messages):
+                            if m["type"] == "tool_call" and m["tool"] == tool_name and m.get("toolStatus") == "running":
+                                # Append live output to toolPreview
+                                m["toolPreview"] = (m.get("toolPreview") or "") + delta_text
+                                preview = m["toolPreview"]
+                                idx = self._messages.index(m)
+                                self._gui(lambda i=idx, p=preview: self.messageUpdated.emit(i, {"toolPreview": p}))
+                                break
+
         # ── Tool calls ──────────────────────────────────────────
         elif event_name == "tool.started":
             self._add_tool_call(
                 data.get("tool") or data.get("tool_name") or "tool",
                 data.get("preview") or "",
                 "running",
+                data.get("args") if isinstance(data.get("args"), dict) else None,
             )
         elif event_name == "tool.completed":
             self._complete_tool_call(
@@ -562,9 +582,15 @@ class HermesBackend(QObject):
                 return
         self._append(db._row("thinking", content=text, timestamp=time.time()))
 
-    def _add_tool_call(self, tool: str, preview: str, status: str) -> None:
+    def _add_tool_call(self, tool: str, preview: str, status: str, args: dict | None = None) -> None:
+        args_json = ""
+        if args and isinstance(args, dict):
+            try:
+                args_json = json.dumps(args, ensure_ascii=False)
+            except (TypeError, ValueError):
+                args_json = str(args)
         self._append(
-            db._row("tool_call", tool=tool, toolPreview=preview, toolStatus=status, timestamp=time.time())
+            db._row("tool_call", tool=tool, toolPreview=preview, toolArgs=args_json, toolStatus=status, timestamp=time.time())
         )
 
     def _complete_tool_call(self, tool: str, duration, error: bool) -> None:
