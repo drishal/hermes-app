@@ -332,28 +332,6 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                 }
 
-                Rectangle {
-                    width: 22
-                    height: 22
-                    radius: 11
-                    color: expandMouse.containsMouse ? Theme.surfaceHover : "transparent"
-                    anchors.verticalCenter: parent.verticalCenter
-
-                    DankIcon {
-                        anchors.centerIn: parent
-                        name: root.expanded ? "close_fullscreen" : "open_in_full"
-                        size: 14
-                        color: Theme.surfaceTextMedium
-                    }
-
-                    MouseArea {
-                        id: expandMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.expandToggled()
-                    }
-                }
             }
         }
 
