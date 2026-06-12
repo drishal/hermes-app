@@ -51,6 +51,7 @@ function iconFor(tool) {
     if (t === "delete" || t === "rm" || t === "remove") return "delete"
     if (t === "move" || t === "mv" || t === "rename") return "drive_file_move"
     if (t === "todo" || t === "task" || t === "plan") return "checklist"
+    if (t === "delegate" || t === "delegate_task") return "account_tree"
     return "build"
 }
 
@@ -419,7 +420,33 @@ function classifyResultContent(tool, rawContent) {
         return { type: "json" }
     }
 
+    // ── Delegate task result ─────────────────────────────────
+    if (t === "delegate_task" || t === "delegate") {
+        let obj = null
+        try { obj = JSON.parse(s) } catch (e) {}
+        if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+            // The result often has a "summary" or "result" field with the
+            // subagent's final output, plus metadata like duration.
+            const summary = obj.summary || obj.result || obj.output || ""
+            const status = obj.status || ""
+            if (summary) {
+                const meta = status ? status : ""
+                return { type: "code", language: "", body: String(summary), meta: meta }
+            }
+        }
+        // If it's plain text (not JSON), show it directly.
+        if (s.trim() && s.charAt(0) !== "{" && s.charAt(0) !== "[") {
+            return { type: "text", body: _truncate(s, 400) }
+        }
+        return { type: "json" }
+    }
+
     // ── Fallback ─────────────────────────────────────────────
+    // If the content isn't JSON, show it as text instead of feeding
+    // garbage to JsonView (which renders nothing for non-JSON input).
+    if (s.trim() && s.charAt(0) !== "{" && s.charAt(0) !== "[") {
+        return { type: "text", body: _truncate(s, 400) }
+    }
     return { type: "json" }
 }
 
@@ -483,11 +510,34 @@ function classifyCallContent(tool, rawArgs) {
         if (pattern) return { type: "code", language: "", body: String(pattern) + path }
     }
 
+    // Delegate task: show the goal and context.
+    if (t === "delegate_task" || t === "delegate") {
+        const fields = []
+        const goal = args.goal || args.task || ""
+        const ctx = args.context || ""
+        const tasks = args.tasks
+        if (goal) fields.push({ key: "goal", value: _truncate(String(goal), 200), highlight: true })
+        if (ctx) fields.push({ key: "context", value: _truncate(String(ctx), 120), highlight: false })
+        if (Array.isArray(tasks) && tasks.length > 0) {
+            const summaries = tasks.slice(0, 3).map(function(task, i) {
+                const tGoal = task.goal || task.task || ""
+                return (i + 1) + ". " + _truncate(tGoal, 60)
+            })
+            if (tasks.length > 3) summaries.push("… and " + (tasks.length - 3) + " more")
+            fields.push({ key: "tasks", value: summaries.join("\n"), highlight: false })
+        }
+        const toolsets = args.toolsets || args.enabled_toolsets
+        if (Array.isArray(toolsets) && toolsets.length > 0) {
+            fields.push({ key: "toolsets", value: toolsets.join(", "), highlight: false })
+        }
+        if (fields.length > 0) return { type: "kv", fields: fields }
+    }
+
     // Generic: build key-value pairs from scalar fields.
     const fields = []
     const scalarKeys = ["path", "file", "file_path", "url", "uri", "query", "pattern",
                         "command", "input", "name", "title", "message", "text", "mode",
-                        "offset", "limit", "language"]
+                        "offset", "limit", "language", "goal", "context", "task"]
     for (const k of scalarKeys) {
         if (args[k] !== undefined && args[k] !== null && args[k] !== "") {
             const v = String(args[k])
@@ -500,6 +550,17 @@ function classifyCallContent(tool, rawArgs) {
         }
     }
     if (fields.length > 0) return { type: "kv", fields: fields }
+
+    // If we couldn't classify the content but the raw args string isn't
+    // valid JSON, show it as plain text rather than feeding garbage to
+    // JsonView (which renders nothing for non-JSON input).
+    const rawS = String(rawArgs).trim()
+    if (rawS) {
+        // Quick check: does it look like JSON?
+        if (rawS.charAt(0) !== "{" && rawS.charAt(0) !== "[") {
+            return { type: "text", body: _truncate(rawS, 400) }
+        }
+    }
 
     return { type: "json" }
 }
