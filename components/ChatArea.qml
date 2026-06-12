@@ -1221,22 +1221,8 @@ Item {
                             font.italic: tcc.toolStatus === "running"
                         }
 
-                        // Muted one-line preview between the name and the status.
-                        StyledText {
-                            visible: !tcc.isExpanded && tcc.previewLine.length > 0
-                            anchors.left: toolNameText.right
-                            anchors.leftMargin: Theme.spacingM
-                            anchors.right: statusText.visible ? statusText.left
-                                         : statusIcon.visible ? statusIcon.left
-                                         : chevron.visible ? chevron.left : parent.right
-                            anchors.rightMargin: Theme.spacingM
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: tcc.previewLine
-                            color: Theme.surfaceTextMedium
-                            font.pixelSize: Theme.fontSizeSmall - 1
-                            font.family: "monospace"
-                            elide: Text.ElideRight
-                        }
+                        // Preview hidden when collapsed — matches Claude web UI
+                        // where collapsed cards show only icon + label + chevron.
 
                         MouseArea {
                             id: headerMouse
