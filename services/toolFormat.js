@@ -124,6 +124,106 @@ function summarize(tool, rawArgs) {
     return { hint: "", detail: "" }
 }
 
+// Friendly Claude-web-style label for a tool name ("Searched the web",
+// "Read file", "Ran a command", …). Falls back to a humanised version of
+// the raw tool name for things we haven't enumerated yet.
+function labelFor(tool) {
+    const t = String(tool || "").toLowerCase()
+    if (t === "web_search" || t === "web_search_results"
+        || t === "search_web") return "Searched the web"
+    if (t === "web" || t === "web_fetch" || t === "fetch" || t === "fetch_url") return "Fetched"
+    if (t === "read" || t === "read_file" || t === "view" || t === "cat") return "Read file"
+    if (t === "terminal" || t === "bash" || t === "shell" || t === "exec") return "Ran a command"
+    if (t === "patch" || t === "edit" || t === "str_replace" || t === "replace") return "Edited file"
+    if (t === "write" || t === "write_file" || t === "create_file" || t === "create") return "Wrote file"
+    if (t === "delete" || t === "rm" || t === "remove") return "Deleted file"
+    if (t === "move" || t === "mv" || t === "rename") return "Moved file"
+    if (t === "ls" || t === "list" || t === "list_directory" || t === "tree") return "Listed directory"
+    if (t === "glob") return "Matched files"
+    if (t === "grep" || t === "ripgrep" || t === "rg") return "Searched files"
+    if (t === "todo" || t === "task" || t === "plan") return "Updated tasks"
+    if (t === "image_gen" || t === "image") return "Generated image"
+    if (t === "tts" || t === "text_to_speech") return "Generated audio"
+    if (t === "vision" || t === "vision_analyze") return "Analyzed image"
+    if (t === "delegate" || t === "delegate_task") return "Delegated task"
+    if (t === "cron" || t === "cronjob") return "Scheduled job"
+    // Fallback: turn `web_search_results` into `Web search results` rather
+    // than showing the raw snake_case name.
+    if (!t) return "Tool"
+    return t.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())
+}
+
+// True if the tool's result body is shaped like a list of web search hits —
+// used to swap the JsonView for the Claude-style results list.
+function isWebResults(tool, rawContent) {
+    const t = String(tool || "").toLowerCase()
+    // "Searched the web" tools render as a result list. "Fetched" is a single
+    // page — keep the JsonView tree for those so a 50KB HTML blob doesn't
+    // blow up the chat.
+    if (t !== "web_search" && t !== "web_search_results"
+        && t !== "search_web") return false
+    const items = _parseResultsArray(rawContent)
+    return Array.isArray(items) && items.length > 0
+    && items.every(r => r && typeof r === "object" && (r.url || r.title || r.name))
+}
+
+// Parse the untrusted_tool_result envelope and pull out the `results` array.
+// Mirrors jsonFormat.unwrap (kept inline so toolFormat.js has no module
+// dependency — same trick summarizeResult uses). Returns [] on any miss.
+function _parseResultsArray(rawContent) {
+    if (!rawContent) return []
+    let text = String(rawContent)
+    // Strip the untrusted envelope opening tag + security preamble.
+    const m = text.match(/<untrusted_tool_result(?:\s+source="[^"]*")?\s*>/)
+    if (m) {
+        text = text.slice(m.index + m[0].length)
+        text = text.replace(/<\/untrusted_tool_result>\s*$/, "")
+        const brace = text.search(/[{[]/)
+        if (brace > 0) {
+            const preamble = text.slice(0, brace)
+            if (/retrieved from an external source|Treat it as DATA/i.test(preamble))
+                text = text.slice(brace)
+        }
+    }
+    text = text.trim()
+    let obj = null
+    try { obj = JSON.parse(text) } catch (e) {}
+    if (!obj) {
+        // Fallback: take the largest {...} or [...] slice.
+        const first = text.search(/[{[]/)
+        const last = Math.max(text.lastIndexOf("}"), text.lastIndexOf("]"))
+        if (first >= 0 && last > first) {
+            try { obj = JSON.parse(text.slice(first, last + 1)) } catch (e) {}
+        }
+    }
+    if (!obj || typeof obj !== "object") return []
+    if (Array.isArray(obj.results)) return obj.results
+    if (Array.isArray(obj)) return obj
+    return []
+}
+
+// Normalise a single web result into { title, url, source, snippet } so the
+// QML side can render the same row regardless of which field names the
+// upstream provider used.
+function normaliseWebResult(r) {
+    if (!r || typeof r !== "object") return null
+    const title = r.title || r.name || r.headline || ""
+    const url = r.url || r.link || r.href || ""
+    const snippet = r.snippet || r.description || r.content || r.excerpt || ""
+    let source = r.source || r.domain || ""
+    if (!source && url) {
+        try { source = String(url).replace(/^https?:\/\//, "").split("/")[0] } catch (e) {}
+    }
+    return { title: String(title), url: String(url),
+             source: String(source), snippet: String(snippet) }
+}
+
+// Parse web results into a normalised array. Empty array on any miss so
+// callers fall back to the JsonView tree.
+function parseWebResults(rawContent) {
+    return _parseResultsArray(rawContent).map(normaliseWebResult).filter(Boolean)
+}
+
 // Result-row header summary. Returns { success: bool, detail: string }
 function summarizeResult(tool, rawContent) {
     if (!rawContent) return { success: true, detail: "" }

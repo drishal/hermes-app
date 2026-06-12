@@ -1096,7 +1096,9 @@ Item {
 
     // ── Tool Call ──────────────────────────────────────────────
     // Claude-style activity card: icon · tool name · muted one-line preview,
-    // status on the right, click to expand the full arguments.
+    // click to expand the full arguments. Status (spinner / check) only shows
+    // while running — once completed, the header is quiet, matching the
+    // Claude web UI where the result card carries the success affordance.
     Component {
         id: toolCallMsgComponent
 
@@ -1111,6 +1113,7 @@ Item {
             readonly property real toolDuration: msg ? (msg.toolDuration || 0) : 0
             readonly property bool isExpanded: msg ? !!msg.expanded : false
             readonly property string previewLine: toolPreview.replace(/\s+/g, " ").trim()
+            readonly property string toolLabel: Tf.labelFor(toolName)
             height: card.height + 2
 
             function toggleExpanded() {
@@ -1156,7 +1159,7 @@ Item {
                             anchors.left: toolIcon.right
                             anchors.leftMargin: Theme.spacingXS
                             anchors.verticalCenter: parent.verticalCenter
-                            text: tcc.toolName
+                            text: tcc.toolLabel
                             color: Theme.surfaceText
                             font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Medium
@@ -1175,18 +1178,19 @@ Item {
                         }
 
                         // Status: spinner while running, then duration / failed.
+                        // Hidden once completed so the result card carries the
+                        // success affordance — matches Claude web.
                         DankIcon {
                             id: statusIcon
                             anchors.right: chevron.visible ? chevron.left : parent.right
                             anchors.rightMargin: Theme.spacingXS
                             anchors.verticalCenter: parent.verticalCenter
-                            visible: tcc.toolStatus !== ""
+                            visible: tcc.toolStatus === "running" || tcc.toolStatus === "error"
                             name: tcc.toolStatus === "running" ? "progress_activity"
-                                : tcc.toolStatus === "error" ? "error_outline" : "check"
+                                : "error_outline"
                             size: 13
                             color: tcc.toolStatus === "error" ? Theme.error
-                                 : tcc.toolStatus === "running" ? Theme.tertiary
-                                 : Theme.surfaceTextMedium
+                                 : Theme.tertiary
 
                             RotationAnimation on rotation {
                                 running: tcc.toolStatus === "running"
@@ -1194,7 +1198,6 @@ Item {
                                 from: 0; to: 360
                                 duration: 900
                             }
-                            // Reset the spin once the call resolves.
                             Connections {
                                 target: tcc
                                 function onToolStatusChanged() {
@@ -1205,20 +1208,14 @@ Item {
 
                         StyledText {
                             id: statusText
-                            anchors.right: statusIcon.visible ? statusIcon.left : parent.right
+                            anchors.right: statusIcon.visible ? statusIcon.left
+                                          : chevron.visible ? chevron.left : parent.right
                             anchors.rightMargin: Theme.spacingXS
                             anchors.verticalCenter: parent.verticalCenter
-                            visible: text !== ""
-                            text: {
-                                if (tcc.toolStatus === "running") return "running…"
-                                if (tcc.toolStatus === "error") return "failed"
-                                if (tcc.toolDuration > 0) {
-                                    return tcc.toolDuration < 1
-                                        ? (tcc.toolDuration * 1000).toFixed(0) + "ms"
-                                        : tcc.toolDuration.toFixed(1) + "s"
-                                }
-                                return ""
-                            }
+                            visible: tcc.toolStatus === "running" || tcc.toolStatus === "error"
+                            text: tcc.toolStatus === "running" ? "running…"
+                                 : tcc.toolStatus === "error"  ? "failed"
+                                 : ""
                             color: tcc.toolStatus === "error" ? Theme.error : Theme.surfaceTextMedium
                             font.pixelSize: Theme.fontSizeSmall - 1
                             font.italic: tcc.toolStatus === "running"
@@ -1282,6 +1279,11 @@ Item {
     }
 
     // ── Tool Result (collapsible card) ─────────────────────────
+    // Claude-web-style: header shows icon · friendly label · chevron, with
+    // a right-side count ("9 results", "+3 −1", "12 lines", …). For
+    // web_search-shaped payloads the body is a tidy list (favicon · title ·
+    // url); anything else falls back to the JsonView tree. A small "Done"
+    // pill at the bottom of the expanded body signals the run is finished.
     Component {
         id: toolResultMsgComponent
 
@@ -1295,6 +1297,12 @@ Item {
             readonly property bool isExpanded: msg ? !!msg.expanded : false
             readonly property var _summary: Tf.summarizeResult(toolName, contentText)
             readonly property bool success: !_summary || _summary.success !== false
+            readonly property string toolLabel: Tf.labelFor(toolName)
+            readonly property var _webResults: Tf.isWebResults(toolName, contentText)
+                                      ? Tf.parseWebResults(contentText) : []
+            readonly property bool hasWebResults: _webResults && _webResults.length > 0
+            // Explicit card height: header (30) + body (when expanded) +
+            // Done pill footer (only when expanded and we have results).
             height: card.height + 2
 
             Rectangle {
@@ -1302,7 +1310,11 @@ Item {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 // Explicit height — see the tool-call card for why no Column.
-                height: 30 + (trc.isExpanded ? resBox.height : 0)
+                height: 30
+                    + (trc.isExpanded
+                        ? resBodyContainer.height
+                          + (trc.hasWebResults ? 36 + Theme.spacingS : 0)
+                        : 0)
                 radius: Math.max(6, Theme.cornerRadius / 2)
                 color: Theme.surfaceContainer
                 border.width: 1
@@ -1318,85 +1330,163 @@ Item {
 
                     DankIcon {
                         id: resStateIcon
-                            anchors.left: parent.left
-                            anchors.leftMargin: Theme.spacingS
-                            anchors.verticalCenter: parent.verticalCenter
-                            name: trc.success ? "check_circle" : "error_outline"
-                            size: 13
-                            color: trc.success ? Theme.surfaceTextMedium : Theme.error
-                        }
-
-                        StyledText {
-                            id: resName
-                            anchors.left: resStateIcon.right
-                            anchors.leftMargin: Theme.spacingXS
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: trc.toolName || "result"
-                            color: Theme.surfaceText
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.weight: Font.Medium
-                        }
-
-                        DankIcon {
-                            id: resChevron
-                            anchors.right: parent.right
-                            anchors.rightMargin: Theme.spacingS
-                            anchors.verticalCenter: parent.verticalCenter
-                            name: trc.isExpanded ? "expand_less" : "expand_more"
-                            size: 14
-                            color: Theme.surfaceTextMedium
-                        }
-
-                        StyledText {
-                            id: resLines
-                            anchors.right: resChevron.left
-                            anchors.rightMargin: Theme.spacingXS
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: trc.contentText.split("\n").length + " lines"
-                            color: Theme.surfaceTextMedium
-                            font.pixelSize: Theme.fontSizeSmall - 2
-                            opacity: 0.7
-                        }
-
-                        // Muted result summary between the name and the line count.
-                        StyledText {
-                            visible: !trc.isExpanded && trc._summary && !!trc._summary.detail
-                            anchors.left: resName.right
-                            anchors.leftMargin: Theme.spacingM
-                            anchors.right: resLines.left
-                            anchors.rightMargin: Theme.spacingM
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: trc._summary ? (trc._summary.detail || "") : ""
-                            color: Theme.surfaceTextMedium
-                            font.pixelSize: Theme.fontSizeSmall - 1
-                            font.family: "monospace"
-                            elide: Text.ElideRight
-                        }
-
-                        MouseArea {
-                            id: trcHeaderMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                const ml = hermesService.messageList
-                                if (trc.rowIndex >= 0 && trc.rowIndex < ml.count)
-                                    ml.setProperty(trc.rowIndex, "expanded", !trc.isExpanded)
-                            }
-                        }
+                        anchors.left: parent.left
+                        anchors.leftMargin: Theme.spacingS
+                        anchors.verticalCenter: parent.verticalCenter
+                        name: trc.success ? "check_circle" : "error_outline"
+                        size: 13
+                        color: trc.success ? Theme.surfaceTextMedium : Theme.error
                     }
 
+                    StyledText {
+                        id: resName
+                        anchors.left: resStateIcon.right
+                        anchors.leftMargin: Theme.spacingXS
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: trc.toolLabel || "Result"
+                        color: Theme.surfaceText
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.weight: Font.Medium
+                    }
+
+                    DankIcon {
+                        id: resChevron
+                        anchors.right: parent.right
+                        anchors.rightMargin: Theme.spacingS
+                        anchors.verticalCenter: parent.verticalCenter
+                        name: trc.isExpanded ? "expand_less" : "expand_more"
+                        size: 14
+                        color: Theme.surfaceTextMedium
+                    }
+
+                    // Right-side count: web result count, diff lines, lines,
+                    // items, etc — whatever summarizeResult thought was
+                    // most useful. Smaller and muted, Claude-web style.
+                    StyledText {
+                        id: resCount
+                        anchors.right: resChevron.left
+                        anchors.rightMargin: Theme.spacingXS
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: !!text
+                        text: {
+                            if (trc._webResults && trc._webResults.length > 0)
+                                return trc._webResults.length + " result"
+                                     + (trc._webResults.length === 1 ? "" : "s")
+                            if (trc._summary && trc._summary.detail) return trc._summary.detail
+                            return ""
+                        }
+                        color: Theme.surfaceTextMedium
+                        font.pixelSize: Theme.fontSizeSmall - 1
+                        opacity: 0.85
+                    }
+
+                    MouseArea {
+                        id: trcHeaderMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            const ml = hermesService.messageList
+                            if (trc.rowIndex >= 0 && trc.rowIndex < ml.count)
+                                ml.setProperty(trc.rowIndex, "expanded", !trc.isExpanded)
+                        }
+                    }
+                }
+
+                // Expanded body: either the Claude-style results list (for
+                // web_search-shaped payloads) or the JsonView tree. Both
+                // share a single Item whose height is reported up to card
+                // so the explicit card.height math stays simple.
                 Item {
-                    id: resBox
+                    id: resBodyContainer
                     visible: trc.isExpanded
                     anchors.top: resHeader.bottom
                     anchors.left: parent.left
                     anchors.right: parent.right
-                    // Cap very large payloads (e.g. web_search's 40+ lines) and
-                    // let the body scroll, like the old CodeBlock did.
-                    height: Math.min(resultJson.height, 320) + Theme.spacingS
+                    height: {
+                        if (!trc.isExpanded) return 0
+                        if (trc.hasWebResults)
+                            return webResultsList.height + Theme.spacingS
+                        return Math.min(resultJson.height, 320) + Theme.spacingS * 2
+                    }
 
+                    // ── Web-results list (favicon · title · url · snippet) ──
+                    ListView {
+                        id: webResultsList
+                        visible: trc.hasWebResults
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.topMargin: Theme.spacingXS
+                        anchors.leftMargin: Theme.spacingS
+                        anchors.rightMargin: Theme.spacingS
+                        interactive: false
+                        clip: true
+                        model: trc._webResults
+                        spacing: 0
+                        delegate: webResultRowComponent
+                    }
+
+                    Component {
+                        id: webResultRowComponent
+                        Item {
+                            width: webResultsList.width
+                            height: rowCol.implicitHeight + Theme.spacingM
+                            // Thin separator between rows — Claude web uses
+                            // a hairline divider rather than full gaps.
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                height: 1
+                                color: Theme.outlineVariant
+                                opacity: 0.4
+                            }
+                            Column {
+                                id: rowCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.topMargin: Theme.spacingM
+                                spacing: 2
+                                StyledText {
+                                    width: parent.width
+                                    text: modelData.title || modelData.url || "(untitled)"
+                                    color: Theme.surfaceText
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.weight: Font.Medium
+                                    wrapMode: Text.WordWrap
+                                    visible: text.length > 0
+                                }
+                                StyledText {
+                                    width: parent.width
+                                    text: modelData.source
+                                        ? modelData.source
+                                        : (modelData.url ? modelData.url : "")
+                                    color: Theme.surfaceTextMedium
+                                    font.pixelSize: Theme.fontSizeSmall - 2
+                                    opacity: 0.75
+                                    elide: Text.ElideRight
+                                    visible: text.length > 0
+                                }
+                                StyledText {
+                                    width: parent.width
+                                    text: modelData.snippet
+                                    color: Theme.surfaceTextMedium
+                                    font.pixelSize: Theme.fontSizeSmall - 1
+                                    wrapMode: Text.WordWrap
+                                    visible: text.length > 0
+                                    elide: Text.ElideRight
+                                    maximumLineCount: 2
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Generic JsonView tree for non-web payloads ──
                     Flickable {
+                        id: resultFlick
+                        visible: !trc.hasWebResults
                         anchors.fill: parent
                         anchors.leftMargin: Theme.spacingS + 22
                         anchors.rightMargin: Theme.spacingS
@@ -1413,6 +1503,53 @@ Item {
                             width: parent.width
                             content: trc.isExpanded ? trc.contentText : ""
                             sourceAccent: trc.success ? Theme.primary : Theme.error
+                        }
+                    }
+                }
+
+                // ── Done footer pill — matches the Claude web UI's "Done"
+                //    button that sits at the bottom of expanded web cards.
+                Rectangle {
+                    id: donePill
+                    visible: trc.isExpanded && trc.hasWebResults
+                    anchors.top: resBodyContainer.bottom
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.topMargin: 2
+                    width: doneRow.implicitWidth + Theme.spacingM * 2
+                    height: 28
+                    radius: height / 2
+                    color: doneMouse.containsMouse ? Theme.surfaceContainerHigh
+                                                   : "transparent"
+                    border.width: 1
+                    border.color: Theme.outlineVariant
+
+                    Row {
+                        id: doneRow
+                        anchors.centerIn: parent
+                        spacing: Theme.spacingXS
+                        DankIcon {
+                            name: "check"
+                            size: 12
+                            color: Theme.surfaceTextMedium
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        StyledText {
+                            text: "Done"
+                            color: Theme.surfaceTextMedium
+                            font.pixelSize: Theme.fontSizeSmall - 1
+                            font.weight: Font.Medium
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+                    MouseArea {
+                        id: doneMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            const ml = hermesService.messageList
+                            if (trc.rowIndex >= 0 && trc.rowIndex < ml.count)
+                                ml.setProperty(trc.rowIndex, "expanded", false)
                         }
                     }
                 }
