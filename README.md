@@ -53,16 +53,16 @@ gateway key from `API_SERVER_KEY` in `~/.hermes/.env` (sent as a
 `~/.config/HermesApp/settings.json`.
 
 Session and message history is read directly from the Hermes sqlite DB under
-`hermesHome` (default `~/.hermes`); only *runs* go over HTTP/SSE.
+`hermesHome` (default `~/.hermes`); only _runs_ go over HTTP/SSE.
 
 ## Configuration
 
-| Setting        | Default                  | Notes                                            |
-|----------------|--------------------------|--------------------------------------------------|
-| `apiBaseUrl`   | `http://127.0.0.1:8642`  | Gateway base URL                                 |
-| `apiKey`       | *(empty)*                | Falls back to `API_SERVER_KEY` in `~/.hermes/.env` |
-| `hermesHome`   | `~/.hermes`              | Holds `.env` and the sqlite session DB           |
-| `selectedModel`| *(gateway default)*      | Model id passed to `/v1/runs`                     |
+| Setting         | Default                 | Notes                                              |
+| --------------- | ----------------------- | -------------------------------------------------- |
+| `apiBaseUrl`    | `http://127.0.0.1:8642` | Gateway base URL                                   |
+| `apiKey`        | _(empty)_               | Falls back to `API_SERVER_KEY` in `~/.hermes/.env` |
+| `hermesHome`    | `~/.hermes`             | Holds `.env` and the sqlite session DB             |
+| `selectedModel` | _(gateway default)_     | Model id passed to `/v1/runs`                      |
 
 Stored at `~/.config/HermesApp/settings.json`.
 
