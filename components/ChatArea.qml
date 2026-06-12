@@ -1247,31 +1247,26 @@ Item {
                         }
                     }
 
-                // Expanded: the arguments as a neat tree.
+                // Expanded: structured content via ToolContentView
+                // (key-value, code, or JsonView fallback).
                 Item {
                     id: argsBox
                     visible: tcc.isExpanded
                     anchors.top: callHeader.bottom
                     anchors.left: parent.left
                     anchors.right: parent.right
-                    height: Math.min(argsJson.height, 320) + Theme.spacingS
+                    height: tcc.isExpanded ? argsContent.height + Theme.spacingS : 0
 
-                    Flickable {
-                        anchors.fill: parent
-                        anchors.leftMargin: Theme.spacingS + 22
-                        anchors.rightMargin: Theme.spacingS
-                        contentWidth: width
-                        contentHeight: argsJson.height
-                        clip: true
-                        flickableDirection: Flickable.VerticalFlick
-                        interactive: contentHeight > height
-                        boundsBehavior: Flickable.StopAtBounds
+                    readonly property var _classified: Tf.classifyCallContent(tcc.toolName, tcc.toolPreview)
 
-                        JsonView {
-                            id: argsJson
-                            width: parent.width
-                            content: tcc.isExpanded ? tcc.toolPreview : ""
-                        }
+                    ToolContentView {
+                        id: argsContent
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        content: parent._classified.type !== "json" ? parent._classified : null
+                        rawText: parent._classified.type === "json" && tcc.isExpanded
+                                 ? tcc.toolPreview : ""
                     }
                 }
             }
@@ -1407,7 +1402,7 @@ Item {
                         if (!trc.isExpanded) return 0
                         if (trc.hasWebResults)
                             return webResultsList.height + Theme.spacingS
-                        return Math.min(resultJson.height, 320) + Theme.spacingS * 2
+                        return resultStructured.height + Theme.spacingS
                     }
 
                     // ── Web-results list (favicon · title · url · snippet) ──
@@ -1483,25 +1478,29 @@ Item {
                         }
                     }
 
-                    // ── Generic JsonView tree for non-web payloads ──
-                    Flickable {
-                        id: resultFlick
+                    // ── Structured content for non-web payloads ──
+                    // Uses ToolContentView for known tool types
+                    // (terminal, patch, read, write, search) and falls
+                    // back to the JsonView tree for anything else.
+                    Item {
+                        id: resultStructured
                         visible: !trc.hasWebResults
-                        anchors.fill: parent
-                        anchors.leftMargin: Theme.spacingS + 22
-                        anchors.rightMargin: Theme.spacingS
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
                         anchors.topMargin: Theme.spacingXS
-                        contentWidth: width
-                        contentHeight: resultJson.height
-                        clip: true
-                        flickableDirection: Flickable.VerticalFlick
-                        interactive: contentHeight > height
-                        boundsBehavior: Flickable.StopAtBounds
+                        height: visible ? resultToolContent.height : 0
 
-                        JsonView {
-                            id: resultJson
-                            width: parent.width
-                            content: trc.isExpanded ? trc.contentText : ""
+                        readonly property var _classified: Tf.classifyResultContent(trc.toolName, trc.contentText)
+
+                        ToolContentView {
+                            id: resultToolContent
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            content: parent._classified.type !== "json" ? parent._classified : null
+                            rawText: parent._classified.type === "json" && trc.isExpanded
+                                     ? trc.contentText : ""
                             sourceAccent: trc.success ? Theme.primary : Theme.error
                         }
                     }

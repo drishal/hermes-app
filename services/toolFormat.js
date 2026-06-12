@@ -46,7 +46,8 @@ function iconFor(tool) {
     if (t === "search" || t === "grep" || t === "find" || t === "ripgrep" || t === "rg") return "search"
     if (t === "ls" || t === "list" || t === "list_directory" || t === "tree") return "folder_open"
     if (t === "glob") return "filter_alt"
-    if (t === "fetch" || t === "web_fetch" || t === "http" || t === "url" || t === "curl") return "language"
+    if (t === "web_search" || t === "web_search_results" || t === "search_web" || t === "mcp_argus_search_web") return "travel_explore"
+    if (t === "web_extract" || t === "web_fetch" || t === "fetch" || t === "http" || t === "url" || t === "curl" || t === "mcp_argus_extract_content") return "language"
     if (t === "delete" || t === "rm" || t === "remove") return "delete"
     if (t === "move" || t === "mv" || t === "rename") return "drive_file_move"
     if (t === "todo" || t === "task" || t === "plan") return "checklist"
@@ -130,8 +131,9 @@ function summarize(tool, rawArgs) {
 function labelFor(tool) {
     const t = String(tool || "").toLowerCase()
     if (t === "web_search" || t === "web_search_results"
-        || t === "search_web") return "Searched the web"
-    if (t === "web" || t === "web_fetch" || t === "fetch" || t === "fetch_url") return "Fetched"
+        || t === "search_web" || t === "mcp_argus_search_web") return "Searched the web"
+    if (t === "web" || t === "web_fetch" || t === "fetch" || t === "fetch_url"
+        || t === "web_extract" || t === "mcp_argus_extract_content") return "Read webpage"
     if (t === "read" || t === "read_file" || t === "view" || t === "cat") return "Read file"
     if (t === "terminal" || t === "bash" || t === "shell" || t === "exec") return "Ran a command"
     if (t === "patch" || t === "edit" || t === "str_replace" || t === "replace") return "Edited file"
@@ -161,7 +163,7 @@ function isWebResults(tool, rawContent) {
     // page — keep the JsonView tree for those so a 50KB HTML blob doesn't
     // blow up the chat.
     if (t !== "web_search" && t !== "web_search_results"
-        && t !== "search_web") return false
+        && t !== "search_web" && t !== "mcp_argus_search_web") return false
     const items = _parseResultsArray(rawContent)
     return Array.isArray(items) && items.length > 0
     && items.every(r => r && typeof r === "object" && (r.url || r.title || r.name))
@@ -276,4 +278,228 @@ function summarizeResult(tool, rawContent) {
 
     const lc = s.split("\n").length
     return { success: true, detail: lc + " line" + (lc === 1 ? "" : "s") }
+}
+
+// ── Structured content rendering ────────────────────────────────
+// Instead of always dumping raw JSON via JsonView, these helpers
+// classify tool content and return a structured object that QML can
+// render with dedicated components (code blocks, diff views, etc.).
+//
+// classifyResultContent returns:
+//   { type: "code"|"diff"|"text"|"json", ... }
+//
+// type "code" — terminal output or file content:
+//   { type: "code", language: string, body: string, meta: string }
+//   meta is e.g. "exit code: 0" or "512 lines"
+//
+// type "diff" — patch/edit result:
+//   { type: "diff", path: string, body: string, added: int, removed: int }
+//
+// type "text" — plain text (search results, etc.):
+//   { type: "text", body: string }
+//
+// type "json" — fallback, use JsonView tree:
+//   { type: "json" }
+
+function _isTerminalTool(tool) {
+    const t = String(tool || "").toLowerCase()
+    return t === "terminal" || t === "bash" || t === "shell" || t === "run" || t === "exec"
+}
+function _isPatchTool(tool) {
+    const t = String(tool || "").toLowerCase()
+    return t === "patch" || t === "edit" || t === "str_replace" || t === "replace"
+}
+function _isReadTool(tool) {
+    const t = String(tool || "").toLowerCase()
+    return t === "read" || t === "read_file" || t === "view" || t === "cat"
+}
+function _isWriteTool(tool) {
+    const t = String(tool || "").toLowerCase()
+    return t === "write" || t === "write_file" || t === "create_file" || t === "create"
+}
+function _isSearchTool(tool) {
+    const t = String(tool || "").toLowerCase()
+    return t === "search" || t === "grep" || t === "find" || t === "ripgrep" || t === "rg"
+        || t === "search_files" || t === "glob"
+}
+
+function classifyResultContent(tool, rawContent) {
+    if (!rawContent) return { type: "json" }
+    const s = String(rawContent)
+
+    // ── Terminal output ──────────────────────────────────────
+    if (_isTerminalTool(tool)) {
+        let obj = null
+        try { obj = JSON.parse(s) } catch (e) {}
+        if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+            const output = String(obj.output || obj.stdout || "")
+            const stderr = obj.stderr ? String(obj.stderr) : ""
+            const exitCode = obj.exit_code !== undefined ? obj.exit_code : obj.exitCode
+            const body = output + (stderr ? "\n" + stderr : "")
+            const meta = exitCode !== undefined ? ("exit code: " + exitCode) : ""
+            if (body.trim()) return { type: "code", language: "bash", body: body, meta: meta }
+        }
+        // If it's not structured JSON, it's probably raw output.
+        if (s.trim()) return { type: "code", language: "bash", body: s, meta: "" }
+        return { type: "json" }
+    }
+
+    // ── Patch / edit result ──────────────────────────────────
+    if (_isPatchTool(tool)) {
+        let obj = null
+        try { obj = JSON.parse(s) } catch (e) {}
+        if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+            if (obj.diff) {
+                const lines = String(obj.diff).split("\n")
+                let added = 0, removed = 0
+                for (const ln of lines) {
+                    if (ln.startsWith("+") && !ln.startsWith("+++")) added++
+                    else if (ln.startsWith("-") && !ln.startsWith("---")) removed++
+                }
+                const path = obj.path || obj.file || obj.file_path || ""
+                return { type: "diff", path: String(path), body: String(obj.diff),
+                         added: added, removed: removed }
+            }
+            // No diff but has path — just show success/failure.
+            if (obj.path || obj.file || obj.file_path) {
+                const path = obj.path || obj.file || obj.file_path
+                const detail = obj.success === false ? "failed" : "ok"
+                return { type: "text", body: _shortenPath(String(path)) + " — " + detail }
+            }
+        }
+        return { type: "json" }
+    }
+
+    // ── Read file result ─────────────────────────────────────
+    if (_isReadTool(tool)) {
+        let obj = null
+        try { obj = JSON.parse(s) } catch (e) {}
+        if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+            const content = obj.content !== undefined ? String(obj.content) : ""
+            const path = obj.path || obj.file || obj.file_path || ""
+            const totalLines = obj.total_lines || obj.lines || 0
+            const meta = (path ? _shortenPath(String(path)) : "")
+                       + (totalLines ? (" — " + totalLines + " lines") : "")
+            if (content) return { type: "code", language: "", body: content, meta: meta }
+        }
+        return { type: "json" }
+    }
+
+    // ── Write file result ────────────────────────────────────
+    if (_isWriteTool(tool)) {
+        let obj = null
+        try { obj = JSON.parse(s) } catch (e) {}
+        if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+            const path = obj.path || obj.file || obj.file_path || ""
+            if (path) {
+                const detail = obj.success === false ? " — failed" : ""
+                return { type: "text", body: "Wrote " + _shortenPath(String(path)) + detail }
+            }
+        }
+        return { type: "json" }
+    }
+
+    // ── Search / grep result ─────────────────────────────────
+    if (_isSearchTool(tool)) {
+        let obj = null
+        try { obj = JSON.parse(s) } catch (e) {}
+        if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+            // If there's a matches array with file paths, show as a file list.
+            const items = obj.matches || obj.files || obj.results
+            if (Array.isArray(items) && items.length > 0) {
+                const lines = items.slice(0, 30).map(function(m) {
+                    if (typeof m === "string") return m
+                    return m.path || m.file || m.name || m.url || JSON.stringify(m)
+                })
+                if (items.length > 30) lines.push("… and " + (items.length - 30) + " more")
+                return { type: "code", language: "", body: lines.join("\n"),
+                         meta: items.length + " match" + (items.length === 1 ? "" : "es") }
+            }
+        }
+        return { type: "json" }
+    }
+
+    // ── Fallback ─────────────────────────────────────────────
+    return { type: "json" }
+}
+
+// ── Structured tool-call argument rendering ─────────────────────
+// Returns { type: "kv"|"code"|"json", fields: [...], body: string }
+// type "kv" — key-value pairs: { fields: [{ key, value, highlight }] }
+// type "code" — code block: { body: string, language: string }
+// type "json" — fallback to JsonView
+
+function classifyCallContent(tool, rawArgs) {
+    if (!rawArgs) return { type: "json" }
+    const args = _parseArgs(rawArgs)
+    if (!args) return { type: "json" }
+    const t = String(tool || "").toLowerCase()
+
+    // Terminal: show the command prominently.
+    if (_isTerminalTool(tool)) {
+        const cmd = args.command || args.cmd || args.script || args.input || ""
+        if (cmd) return { type: "code", language: "bash", body: String(cmd) }
+    }
+
+    // Patch: show path + mode, with old/new as separate code blocks is too
+    // complex — use a key-value layout for the main fields.
+    if (_isPatchTool(tool)) {
+        const path = args.path || args.file || args.file_path || ""
+        const mode = args.mode || (args.old_string !== undefined ? "replace" : "")
+        const fields = []
+        if (path) fields.push({ key: "path", value: _shortenPath(String(path)), highlight: true })
+        if (mode) fields.push({ key: "mode", value: String(mode), highlight: false })
+        if (args.old_string !== undefined) {
+            const oldS = _collapseWs(String(args.old_string))
+            fields.push({ key: "old", value: _truncate(oldS, 120), highlight: false })
+        }
+        if (args.new_string !== undefined) {
+            const newS = _collapseWs(String(args.new_string))
+            fields.push({ key: "new", value: _truncate(newS, 120), highlight: false })
+        }
+        if (fields.length > 0) return { type: "kv", fields: fields }
+    }
+
+    // Read/write: show the path.
+    if (_isReadTool(tool) || _isWriteTool(tool)) {
+        const path = args.path || args.file || args.file_path || ""
+        const fields = []
+        if (path) fields.push({ key: "path", value: _shortenPath(String(path)), highlight: true })
+        if (args.offset) fields.push({ key: "offset", value: String(args.offset), highlight: false })
+        if (args.limit) fields.push({ key: "limit", value: String(args.limit), highlight: false })
+        if (fields.length > 0) return { type: "kv", fields: fields }
+    }
+
+    // Web search: show the query.
+    if (t === "web_search" || t === "web_search_results" || t === "search_web" || t === "mcp_argus_search_web") {
+        const query = args.query || args.q || ""
+        if (query) return { type: "code", language: "", body: String(query) }
+    }
+
+    // Search/grep: show the pattern.
+    if (_isSearchTool(tool)) {
+        const pattern = args.query || args.pattern || args.q || args.regex || args.glob || ""
+        const path = args.path ? " in " + _shortenPath(String(args.path)) : ""
+        if (pattern) return { type: "code", language: "", body: String(pattern) + path }
+    }
+
+    // Generic: build key-value pairs from scalar fields.
+    const fields = []
+    const scalarKeys = ["path", "file", "file_path", "url", "uri", "query", "pattern",
+                        "command", "input", "name", "title", "message", "text", "mode",
+                        "offset", "limit", "language"]
+    for (const k of scalarKeys) {
+        if (args[k] !== undefined && args[k] !== null && args[k] !== "") {
+            const v = String(args[k])
+            fields.push({
+                key: k,
+                value: (k === "path" || k === "file" || k === "file_path" || k === "url")
+                    ? _truncate(v, 80) : _truncate(v, 120),
+                highlight: (k === "path" || k === "file" || k === "file_path" || k === "url" || k === "command")
+            })
+        }
+    }
+    if (fields.length > 0) return { type: "kv", fields: fields }
+
+    return { type: "json" }
 }
