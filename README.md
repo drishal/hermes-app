@@ -107,4 +107,6 @@ QT_QPA_PLATFORM=offscreen python3 tests/smoke_test.py
 
 ## License
 
-Personal project; no license declared yet. Ask before reuse.
+MIT — see [LICENSE](LICENSE). The bundled Material Symbols Rounded font
+(`assets/fonts/MaterialSymbolsRounded.ttf`) is © Google LLC and distributed
+under the Apache 2.0 license; full terms are in the same file.
