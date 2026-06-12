@@ -38,7 +38,17 @@ def load_stylix_colors():
         return None
 
 
+def _is_wayland() -> bool:
+    """Detect a Wayland compositor via XDG_SESSION_TYPE or WAYLAND_DISPLAY."""
+    return os.environ.get("XDG_SESSION_TYPE") == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
+
+
 def main() -> int:
+    # On Wayland, prefer the native platform — Qt's X11 backend routes
+    # through Xft/XRender which produces noticeably blurrier text.
+    if _is_wayland():
+        os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
+
     app = QApplication(sys.argv)
     # Terminate cleanly on Ctrl-C and on SIGTERM (what `kill`/`timeout` send).
     # Set after QApplication so these win over any handler Qt installs —

@@ -131,15 +131,24 @@ Item {
 
             // A window resize re-wraps every delegate (text reflows, tables
             // re-measure) and ListView's cached row positions go stale — rows
-            // overlap until something forces a relayout. Coalesce one
-            // forceLayout() per event-loop turn (so a continuous drag stays
-            // tidy frame to frame), then restore the bottom pin.
-            function _resettle() {
-                forceLayout()
-                if (autoFollow) _pinBottom()
+            // overlap until something forces a relayout. The cascade is:
+            //   width change → delegate TextEdit/TableBlock re-wrap →
+            //   their _relayout via Qt.callLater → delegate height changes →
+            //   ListView needs forceLayout()
+            // Qt.callLater is too early: it fires before delegates finish
+            // their own queued relayouts, so forceLayout sees stale heights.
+            // A short debounced Timer lets the full cascade settle first.
+            Timer {
+                id: resettleTimer
+                interval: 16
+                onTriggered: {
+                    messageListView.forceLayout()
+                    if (messageListView.autoFollow) messageListView._pinBottom()
+                }
             }
-            onWidthChanged: Qt.callLater(_resettle)
-            onHeightChanged: Qt.callLater(_resettle)
+            function _requestResettle() { resettleTimer.restart() }
+            onWidthChanged: _requestResettle()
+            onHeightChanged: _requestResettle()
 
             // After a session load, delegate heights have just settled (rich
             // text, tables) — relayout once and pin to the latest message,
@@ -152,13 +161,13 @@ Item {
                 ignoreUnknownSignals: true
                 function onMessagesLoaded() {
                     messageListView.autoFollow = true
-                    Qt.callLater(messageListView._resettle)
+                    messageListView._requestResettle()
                 }
                 function onRunCompleted(output) {
-                    Qt.callLater(messageListView._resettle)
+                    messageListView._requestResettle()
                 }
                 function onRunFailed(error) {
-                    Qt.callLater(messageListView._resettle)
+                    messageListView._requestResettle()
                 }
             }
 
@@ -209,11 +218,10 @@ Item {
                 objectName: "msgRow"
                 width: messageListView.width - messageListView.leftMargin - messageListView.rightMargin
                 height: contentLoader.height + Theme.spacingXS
-                // Row heights settle asynchronously (MessageContent stacks its
-                // segments via a coalesced relayout), so any late growth must
-                // reposition the rows below — otherwise they overlap. Coalesced:
-                // many rows changing in one turn still cost one forceLayout.
-                onHeightChanged: Qt.callLater(messageListView._resettle)
+                // Row heights settle asynchronously (MessageContent/TableBlock
+                // re-wrap and re-measure). The resettleTimer handles this:
+                // it debounces and runs after the cascade finishes.
+                onHeightChanged: messageListView._requestResettle()
 
                 Loader {
                     id: contentLoader
