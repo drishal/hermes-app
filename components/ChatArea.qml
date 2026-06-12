@@ -8,6 +8,12 @@ Item {
 
     required property var hermesService
 
+    // Claude-style centered reading column: messages and the input bar are
+    // capped at this width and centered; the window grows whitespace instead
+    // of line length.
+    readonly property int contentMaxWidth: 800
+    readonly property int contentWidth: Math.min(width - Theme.spacingL * 2, contentMaxWidth)
+
     // Set true when this ChatArea is being rendered inside the detached
     // FloatingWindow. The expand button toggles its icon/tooltip accordingly.
     property bool expanded: false
@@ -96,13 +102,13 @@ Item {
         ListView {
             id: messageListView
             width: parent.width
-            height: parent.height - statusBar.height - inputRow.height - attachStrip.height
+            height: parent.height - statusBar.height - inputRowWrap.height - attachStrip.height
             clip: true
-            spacing: Theme.spacingS
-            leftMargin: Theme.spacingS
-            rightMargin: Theme.spacingS
-            topMargin: Theme.spacingS
-            bottomMargin: Theme.spacingS
+            spacing: Theme.spacingM
+            leftMargin: Theme.spacingL
+            rightMargin: Theme.spacingL
+            topMargin: Theme.spacingL
+            bottomMargin: Theme.spacingM
 
             model: hermesService.messageList
             boundsBehavior: Flickable.StopAtBounds
@@ -225,7 +231,10 @@ Item {
 
                 Loader {
                     id: contentLoader
-                    width: parent.width
+                    // Centered reading column — rows span the ListView, content
+                    // is capped and centered within them.
+                    width: Math.min(parent.width, root.contentMaxWidth)
+                    anchors.horizontalCenter: parent.horizontalCenter
                     // Capture row data here — Components are declared outside the
                     // delegate, so they don't inherit the delegate's `model` context.
                     // Each loaded item reaches the row via `parent.msg` / `parent.msgIndex`.
@@ -263,9 +272,9 @@ Item {
             color: "transparent"
 
             Row {
-                anchors.fill: parent
-                anchors.leftMargin: Theme.spacingS
-                anchors.rightMargin: Theme.spacingS
+                width: root.contentWidth
+                height: parent.height
+                anchors.horizontalCenter: parent.horizontalCenter
                 spacing: Theme.spacingS
 
                 // Connection dot
@@ -366,8 +375,8 @@ Item {
             ListView {
                 id: attachList
                 anchors.fill: parent
-                anchors.leftMargin: Theme.spacingS
-                anchors.rightMargin: Theme.spacingS
+                anchors.leftMargin: Math.max(Theme.spacingS, (parent.width - root.contentWidth) / 2)
+                anchors.rightMargin: Math.max(Theme.spacingS, (parent.width - root.contentWidth) / 2)
                 anchors.topMargin: 4
                 anchors.bottomMargin: 4
                 orientation: ListView.Horizontal
@@ -426,18 +435,26 @@ Item {
         //  INPUT ROW
         // ═══════════════════════════════════════════════════════
 
-        Rectangle {
-            id: inputRow
+        Item {
+            id: inputRowWrap
             width: parent.width
-            height: Math.min(140, Math.max(44, chatInput.implicitHeight + 20))
-            color: Theme.surfaceContainerHigh
-            radius: Theme.cornerRadius
-            border.width: 1
-            border.color: chatInput.activeFocus ? Theme.primary : Theme.outlineMedium
+            // Bottom inset so the centered input floats off the window edge.
+            height: inputRow.height + Theme.spacingM
 
-            Behavior on height {
-                NumberAnimation { duration: 80; easing.type: Easing.OutCubic }
-            }
+            Rectangle {
+                id: inputRow
+                width: root.contentWidth
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: parent.top
+                height: Math.min(140, Math.max(44, chatInput.implicitHeight + 20))
+                color: Theme.surfaceContainerHigh
+                radius: Theme.cornerRadius
+                border.width: 1
+                border.color: chatInput.activeFocus ? Theme.primary : Theme.outlineMedium
+
+                Behavior on height {
+                    NumberAnimation { duration: 80; easing.type: Easing.OutCubic }
+                }
 
             Rectangle {
                 id: inputField
@@ -587,6 +604,7 @@ Item {
                 Behavior on width {
                     NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
                 }
+            }
             }
         }
     }
