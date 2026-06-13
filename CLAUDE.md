@@ -44,7 +44,14 @@ QML views ──bind──► ListModels ──mirrored by──► HermesServic
   `null` — see **Theming**).
 - **Message rows** are plain dicts with a stable set of roles (see
   `db._row`). `type` selects the delegate in `ChatArea.qml`'s `Loader`:
-  `user | assistant | thinking | tool_call | tool_result | approval`.
+  `user | assistant | thinking | tool_call | tool_result | approval`. Each
+  delegate is its own file (`UserMessage`, `AssistantMessage`, `ThinkingCard`,
+  `ToolCallCard`, `ToolResultCard`, `ApprovalCard`); `ChatArea` keeps only thin
+  Loader-wrapper `Component`s that pass the row + deps each needs (`msg`,
+  `rowIndex`, `hermesService`, and `chat` — the ChatArea root — for the two that
+  call `editMessage`/`retryMessage`). `tests/chat_delegates_test.py` renders one
+  of each type and asserts no warnings + no row overlap; run it after touching
+  any delegate.
 - **Slash commands** (`/new`, `/clear`, `/stop`, `/retry`, `/model`, `/history`,
   `/settings`, `/help`) are intercepted in the composer and run locally — never
   sent to the agent — modelled on hermes-webui's client-side registry. The

@@ -302,6 +302,18 @@ function summarizeResult(tool, rawContent) {
 // type "json" — fallback, use JsonView tree:
 //   { type: "json" }
 
+// Shared fallback for both classifiers: a non-JSON string renders as plain
+// text (feeding it to the JsonView tree shows nothing); a JSON-shaped string
+// falls through to the tree. Keeping this in one place avoids the two
+// classify* functions drifting apart again.
+function _textOrJson(raw) {
+    const s = String(raw || "").trim()
+    if (s && s.charAt(0) !== "{" && s.charAt(0) !== "[") {
+        return { type: "text", body: _truncate(s, 400) }
+    }
+    return { type: "json" }
+}
+
 function _isTerminalTool(tool) {
     const t = String(tool || "").toLowerCase()
     return t === "terminal" || t === "bash" || t === "shell" || t === "run" || t === "exec"
@@ -449,10 +461,7 @@ function classifyResultContent(tool, rawContent) {
     // raw envelope. Plain non-JSON text renders directly; JSON falls through to
     // the tree.
     if (s.indexOf("<untrusted_tool_result") !== -1) return { type: "json" }
-    if (s.trim() && s.charAt(0) !== "{" && s.charAt(0) !== "[") {
-        return { type: "text", body: _truncate(s, 400) }
-    }
-    return { type: "json" }
+    return _textOrJson(s)
 }
 
 // ── Structured tool-call argument rendering ─────────────────────
@@ -567,16 +576,6 @@ function classifyCallContent(tool, rawArgs) {
     }
     if (fields.length > 0) return { type: "kv", fields: fields }
 
-    // If we couldn't classify the content but the raw args string isn't
-    // valid JSON, show it as plain text rather than feeding garbage to
-    // JsonView (which renders nothing for non-JSON input).
-    const rawS = String(rawArgs).trim()
-    if (rawS) {
-        // Quick check: does it look like JSON?
-        if (rawS.charAt(0) !== "{" && rawS.charAt(0) !== "[") {
-            return { type: "text", body: _truncate(rawS, 400) }
-        }
-    }
-
-    return { type: "json" }
+    // Couldn't classify by tool type — non-JSON renders as text, JSON as a tree.
+    return _textOrJson(rawArgs)
 }
