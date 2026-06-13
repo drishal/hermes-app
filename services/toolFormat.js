@@ -459,7 +459,17 @@ function classifyResultContent(tool, rawContent) {
 function classifyCallContent(tool, rawArgs) {
     if (!rawArgs) return { type: "json" }
     const args = _parseArgs(rawArgs)
-    if (!args) return { type: "json" }
+    if (!args) {
+        // The ACP run path sends a pre-formatted, human-readable preview string
+        // (e.g. "$ ls ~/Desktop\n…", "Searching past sessions for: …") rather
+        // than a JSON args dict. Feeding that to the JsonView tree renders an
+        // empty body, so show it as text — code (monospace, whitespace-
+        // preserving) when it looks like a shell command, plain text otherwise.
+        const s = String(rawArgs).trim()
+        if (!s) return { type: "json" }
+        if (/^\$ /.test(s)) return { type: "code", language: "bash", body: s }
+        return { type: "text", body: s }
+    }
     const t = String(tool || "").toLowerCase()
 
     // Terminal: show the command prominently.
