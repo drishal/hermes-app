@@ -710,6 +710,9 @@ Item {
 
                             MouseArea {
                                 id: modelMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
                                 onClicked: {
                                     root._modelPickerOpen = !root._modelPickerOpen
                                     if (root._modelPickerOpen) {

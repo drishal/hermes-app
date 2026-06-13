@@ -2,9 +2,10 @@ import QtQuick
 import qs.Common
 import qs.Widgets
 
-// Claude-style model selector dropdown. Anchored above the composer toolbar by
-// the parent; shows provider labels, model names, and a description. The current
-// model is highlighted and checked.
+// Claude-style model selector dropdown. Positioned by the parent (typically
+// anchored just above the composer toolbar); the picker only owns its content
+// and the open/closed visibility. Letting the parent set width/anchors keeps
+// the chip and the dropdown aligned in the reading column.
 Rectangle {
     id: root
 
@@ -41,11 +42,7 @@ Rectangle {
     signal refreshRequested()
 
     visible: open
-    width: parent ? Math.min(parent.width, 360) : 360
     height: open ? Math.min(listView.contentHeight + header.height + Theme.spacingM, 420) : 0
-    anchors.horizontalCenter: parent ? parent.horizontalCenter : undefined
-    anchors.bottom: parent ? parent.top : undefined
-    anchors.bottomMargin: Theme.spacingS
     radius: Theme.cornerRadius * 1.2
     color: Theme.surfaceContainerHigh
     border.width: 1
@@ -118,7 +115,7 @@ Rectangle {
         StyledText {
             visible: !root.loading && root.models.length === 0
             width: parent.width
-            text: "No models loaded yet. Start a run or click refresh."
+            text: "No models detected. Check the API key or use /model with a model ID."
             color: Theme.surfaceTextMedium
             font.pixelSize: Theme.fontSizeSmall
             horizontalAlignment: Text.AlignHCenter
