@@ -50,13 +50,18 @@ Item {
     function _relayout() {
         let y = 0
         if (sourceChip.visible) y += sourceChip.height + Theme.spacingXS
+        if (!isJson) {
+            // Plain-text fallback sits below the source chip and fills the width.
+            plainText.y = y
+            root._stackedHeight = y + plainText.implicitHeight
+            return
+        }
         for (let k = 0; k < rowRepeater.count; k++) {
             const it = rowRepeater.itemAt(k)
             if (!it) continue
             it.y = y
             y += it.height
         }
-        if (!isJson) y = Math.max(y, plainText.implicitHeight)
         root._stackedHeight = y
     }
 
@@ -97,7 +102,10 @@ Item {
     TextEdit {
         id: plainText
         visible: !root.isJson
-        x: 0
+        // Fill the width so wrapMode has something to wrap to; y is assigned by
+        // _relayout (below the source chip). Anchoring only the right edge — the
+        // old bug — left it unsized and unpositioned, so it never painted.
+        anchors.left: parent.left
         anchors.right: parent.right
         text: visible ? root._unwrapped.body : ""
         color: Theme.surfaceTextMedium

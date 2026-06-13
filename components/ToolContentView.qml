@@ -227,6 +227,10 @@ Item {
         anchors.topMargin: Theme.spacingXS
         anchors.leftMargin: Theme.spacingS + 22
         anchors.rightMargin: Theme.spacingS
+        // Without an explicit height the Flickable viewport is 0px and clips the
+        // whole tree away (the card still sizes itself from jsonFallback.height,
+        // so it looked tall-but-blank). Cap matches _bodyHeight.
+        height: Math.min(jsonFallback.height, 320)
         contentWidth: width
         contentHeight: jsonFallback.height
         clip: true

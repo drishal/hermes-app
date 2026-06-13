@@ -327,6 +327,7 @@ function _isSearchTool(tool) {
 function classifyResultContent(tool, rawContent) {
     if (!rawContent) return { type: "json" }
     const s = String(rawContent)
+    const t = String(tool || "").toLowerCase()
 
     // ── Terminal output ──────────────────────────────────────
     if (_isTerminalTool(tool)) {
@@ -442,8 +443,12 @@ function classifyResultContent(tool, rawContent) {
     }
 
     // ── Fallback ─────────────────────────────────────────────
-    // If the content isn't JSON, show it as text instead of feeding
-    // garbage to JsonView (which renders nothing for non-JSON input).
+    // Envelope-wrapped results (<untrusted_tool_result …>) are best handled by
+    // JsonView, which strips the envelope, surfaces the source as a chip, and
+    // renders the inner JSON tree (or plain text) — far nicer than dumping the
+    // raw envelope. Plain non-JSON text renders directly; JSON falls through to
+    // the tree.
+    if (s.indexOf("<untrusted_tool_result") !== -1) return { type: "json" }
     if (s.trim() && s.charAt(0) !== "{" && s.charAt(0) !== "[") {
         return { type: "text", body: _truncate(s, 400) }
     }
