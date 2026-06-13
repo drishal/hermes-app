@@ -64,6 +64,12 @@ Item {
                 hermesService: root.hermesService
                 expanded: root.expanded
                 onExpandToggled: root.expandToggled()
+
+                // Slash commands route through the same actions as the sidebar
+                // / command palette / settings save.
+                onSettingsRequested: root.showSettings = true
+                onPaletteRequested: palette.show()
+                onModelChangeRequested: (mdl) => root.saved(root.apiBaseUrl, root.apiKey, root.hermesHome, mdl)
             }
 
             SettingsPanel {

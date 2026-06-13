@@ -2,6 +2,7 @@ import QtQuick
 import qs.Common
 import qs.Widgets
 import "../services/toolFormat.js" as Tf
+import "../services/slashCommands.js" as Sc
 
 Item {
     id: root
@@ -18,6 +19,12 @@ Item {
     // FloatingWindow. The expand button toggles its icon/tooltip accordingly.
     property bool expanded: false
     signal expandToggled()
+
+    // Slash commands that need actions ChatArea doesn't own bubble up to
+    // ChatContent (which owns the settings panel, palette and model save).
+    signal settingsRequested()
+    signal paletteRequested()
+    signal modelChangeRequested(string model)
 
     // ── Pasted image attachments ───────────────────────────────
     // List of {path, name} for images pulled off the clipboard. Cleared
@@ -55,6 +62,88 @@ Item {
         hermesService.sendMessage(payload)
         clearAttachments()
         messageListView.autoFollow = true
+    }
+
+    // Composer submit: a recognised slash command runs locally and is never
+    // sent to the agent; everything else is a normal message. Returns true if
+    // it consumed the input (so the caller clears the field).
+    function submit() {
+        const text = chatInput.text
+        if (!text.trim() && root.attachedImages.length === 0) return false
+        const parsed = Sc.parse(text.trim())
+        if (parsed) {
+            runCommand(parsed)
+            return true
+        }
+        sendCurrent(text)
+        return true
+    }
+
+    // ── Slash-command dispatch ─────────────────────────────────
+    // Side effects live here (they need hermesService + the UI signals);
+    // services/slashCommands.js owns the catalog/parsing.
+    function runCommand(parsed) {
+        switch (parsed.name) {
+        case "help":
+            showToast(Sc.helpText(), 9000)
+            break
+        case "new":
+            hermesService.newChat()
+            showToast("Started a new conversation")
+            break
+        case "stop":
+            if (hermesService.isRunning) { hermesService.stopRun(); showToast("Stopping the run…") }
+            else showToast("No active run to stop")
+            break
+        case "retry":
+            retryLast()
+            break
+        case "model":
+            if (parsed.args) {
+                root.modelChangeRequested(parsed.args)
+                showToast("Model set to " + parsed.args + " — applies to new turns")
+            } else {
+                const m = hermesService.currentModel || hermesService.selectedModel
+                showToast("Current model: " + (m || "(gateway default)"))
+            }
+            break
+        case "history":
+            root.paletteRequested()
+            break
+        case "settings":
+            root.settingsRequested()
+            break
+        }
+    }
+
+    // Resend the most recent user message (drops everything after it).
+    function retryLast() {
+        if (hermesService.isRunning) { showToast("Can't retry while a run is active"); return }
+        const ml = hermesService.messageList
+        for (let i = ml.count - 1; i >= 0; i--) {
+            if (ml.get(i).type === "user") {
+                hermesService.resendFrom(i, ml.get(i).content)
+                messageListView.autoFollow = true
+                return
+            }
+        }
+        showToast("Nothing to retry")
+    }
+
+    function showToast(text, ms) {
+        toast.text = text
+        toast.shown = true
+        toastTimer.interval = ms || 3500
+        toastTimer.restart()
+    }
+
+    // ── Slash-command autocomplete state ───────────────────────
+    property var _slashSuggestions: []
+    property int _slashSel: 0
+
+    function applySlash(name) {
+        chatInput.text = "/" + name + " "
+        chatInput.cursorPosition = chatInput.text.length
     }
 
     // Retry: resend the user message that preceded this assistant reply,
@@ -470,12 +559,45 @@ Item {
                         textFormat: TextEdit.PlainText
                         tabStopDistance: 32
 
+                        // Recompute slash suggestions as the command word is typed.
+                        onTextChanged: {
+                            root._slashSuggestions = Sc.suggest(chatInput.text)
+                            root._slashSel = 0
+                        }
+
                         Keys.onPressed: event => {
+                            const sugg = root._slashSuggestions
+                            const hasSugg = sugg && sugg.length > 0
+                            if (hasSugg && event.key === Qt.Key_Down) {
+                                event.accepted = true
+                                root._slashSel = (root._slashSel + 1) % sugg.length
+                                return
+                            }
+                            if (hasSugg && event.key === Qt.Key_Up) {
+                                event.accepted = true
+                                root._slashSel = (root._slashSel - 1 + sugg.length) % sugg.length
+                                return
+                            }
+                            if (hasSugg && event.key === Qt.Key_Tab) {
+                                event.accepted = true
+                                root.applySlash(sugg[root._slashSel].name)
+                                return
+                            }
+                            if (event.key === Qt.Key_Escape && hasSugg) {
+                                event.accepted = true
+                                root._slashSuggestions = []
+                                return
+                            }
                             if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                                 && !(event.modifiers & Qt.ShiftModifier)) {
                                 event.accepted = true
-                                if (chatInput.text.trim() || root.attachedImages.length > 0) {
-                                    root.sendCurrent(chatInput.text)
+                                // A fully-typed command executes; a partial one
+                                // first completes the highlighted suggestion.
+                                if (Sc.parse(chatInput.text.trim())) {
+                                    if (root.submit()) chatInput.text = ""
+                                } else if (hasSugg) {
+                                    root.applySlash(sugg[root._slashSel].name)
+                                } else if (root.submit()) {
                                     chatInput.text = ""
                                 }
                             } else if (event.key === Qt.Key_V
@@ -572,8 +694,7 @@ Item {
                     onClicked: {
                         if (hermesService.isRunning) {
                             hermesService.stopRun()
-                        } else if (chatInput.text.trim() || root.attachedImages.length > 0) {
-                            root.sendCurrent(chatInput.text)
+                        } else if (root.submit()) {
                             chatInput.text = ""
                         }
                     }
@@ -583,6 +704,104 @@ Item {
                     NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
                 }
             }
+            }
+
+            // ── Slash-command autocomplete dropdown ────────────
+            Rectangle {
+                id: slashPopup
+                visible: root._slashSuggestions.length > 0 && chatInput.activeFocus
+                width: root.contentWidth
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: inputRow.top
+                anchors.bottomMargin: Theme.spacingXS
+                height: visible ? slashCol.height + Theme.spacingXS * 2 : 0
+                radius: Theme.cornerRadius
+                color: Theme.surfaceContainerHigh
+                border.width: 1
+                border.color: Theme.outlineMedium
+
+                Column {
+                    id: slashCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.topMargin: Theme.spacingXS
+
+                    Repeater {
+                        model: root._slashSuggestions
+                        delegate: Rectangle {
+                            width: slashCol.width
+                            height: 30
+                            color: index === root._slashSel ? Theme.primaryBackground : "transparent"
+
+                            Row {
+                                anchors.fill: parent
+                                anchors.leftMargin: Theme.spacingM
+                                anchors.rightMargin: Theme.spacingM
+                                spacing: Theme.spacingS
+
+                                StyledText {
+                                    id: slashName
+                                    text: "/" + modelData.name + (modelData.arg ? " " + modelData.arg : "")
+                                    color: Theme.primary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.family: "monospace"
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                                StyledText {
+                                    text: modelData.desc
+                                    color: Theme.surfaceTextMedium
+                                    font.pixelSize: Theme.fontSizeSmall - 1
+                                    elide: Text.ElideRight
+                                    width: parent.width - slashName.width - Theme.spacingS
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onEntered: root._slashSel = index
+                                onClicked: { root.applySlash(modelData.name); chatInput.forceActiveFocus() }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Transient command-result toast ─────────────────
+            Rectangle {
+                id: toast
+                property string text: ""
+                property bool shown: false
+                width: root.contentWidth
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: inputRow.top
+                anchors.bottomMargin: Theme.spacingS
+                height: toastText.implicitHeight + Theme.spacingM * 2
+                radius: Theme.cornerRadius
+                color: Theme.surfaceContainerHighest
+                border.width: 1
+                border.color: Theme.outlineMedium
+                opacity: shown ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: 160 } }
+
+                StyledText {
+                    id: toastText
+                    anchors.centerIn: parent
+                    width: parent.width - Theme.spacingL * 2
+                    text: toast.text
+                    color: Theme.surfaceText
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.family: toast.text.indexOf("\n") >= 0 ? "monospace" : Qt.application.font.family
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: toast.text.indexOf("\n") >= 0 ? Text.AlignLeft : Text.AlignHCenter
+                }
+
+                MouseArea { anchors.fill: parent; onClicked: toast.shown = false }
+                Timer { id: toastTimer; onTriggered: toast.shown = false }
             }
         }
     }

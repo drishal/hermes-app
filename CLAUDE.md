@@ -45,6 +45,17 @@ QML views ──bind──► ListModels ──mirrored by──► HermesServic
 - **Message rows** are plain dicts with a stable set of roles (see
   `db._row`). `type` selects the delegate in `ChatArea.qml`'s `Loader`:
   `user | assistant | thinking | tool_call | tool_result | approval`.
+- **Slash commands** (`/new`, `/clear`, `/stop`, `/retry`, `/model`, `/history`,
+  `/settings`, `/help`) are intercepted in the composer and run locally — never
+  sent to the agent — modelled on hermes-webui's client-side registry. The
+  catalog/parser is `services/slashCommands.js` (single source of truth, also
+  feeds the autocomplete dropdown + `/help`); side effects are dispatched in
+  `ChatArea.runCommand()` since they need `hermesService` + UI signals
+  (`settingsRequested`/`paletteRequested`/`modelChangeRequested` bubble to
+  `ChatContent`). Feedback is a transient in-composer toast — **not** a row
+  injected into `messageList` (that would desync the backend↔QML row indices
+  `resendFrom`/`messageUpdated` depend on). `/clear` and `/reset` alias `/new`
+  for the same reason: a view-only clear can't be done safely here.
 
 ### Run transport: ACP primary, gateway fallback
 
