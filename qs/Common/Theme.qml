@@ -80,6 +80,9 @@ QtObject {
     readonly property color surfaceVariantText: _gray
 
     // ── Surfaces ───────────────────────────────────────────────
+    // Darkest shade (the window background). Used for code blocks so they read
+    // as recessed against the cards/page rather than washed-out and lighter.
+    readonly property color surfaceContainerLowest: _bg0
     readonly property color surfaceContainer: _bg1
     readonly property color surfaceContainerHigh: _bg2
     readonly property color surfaceContainerHighest: _bg3

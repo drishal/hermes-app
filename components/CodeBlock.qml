@@ -13,7 +13,7 @@ Rectangle {
     // misbehave inside the message delegate's Loader chain (see MessageContent).
     implicitHeight: headerRowItem.height + 5 + 4 + codeFlick.height + Theme.spacingS * 2
     height: implicitHeight
-    color: Theme.surfaceContainerHighest
+    color: Theme.surfaceContainerLowest
     radius: Math.max(4, Theme.cornerRadius / 2)
     border.width: 1
     border.color: Theme.outlineVariant
