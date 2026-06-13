@@ -227,7 +227,167 @@ def test_backend_mapping() -> None:
     print("backend_mapping: OK")
 
 
+def test_fetch_gateway_models() -> None:
+    """Parse OpenAI GET /v1/models response into normalized rows."""
+    from unittest.mock import MagicMock, patch
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QCoreApplication
+
+    app = QCoreApplication.instance() or QCoreApplication(sys.argv)
+    from backend.hermes_backend import HermesBackend
+
+    b = HermesBackend()
+    b._apiBaseUrl = "http://localhost:9999"
+    b._apiKey = "test-key"
+
+    # — Case 1: colon-separated id, owned_by available —
+    def make_resp(data_list):
+        m = MagicMock()
+        m.json.return_value = {"data": data_list}
+        return m
+
+    mk = lambda items: make_resp(items)
+
+    with patch.object(b._client, "get", return_value=mk([
+        {"id": "openai:gpt-4o", "owned_by": "openai"},
+        {"id": "claude:claude-3-opus", "owned_by": "anthropic"},
+        {"id": "gemini-pro", "owned_by": "google"},
+    ])):
+        models = b._fetch_gateway_models()
+
+    assert len(models) == 3
+    # provider from colon prefix, name from the rest
+    assert models[0] == {"modelId": "openai:gpt-4o", "name": "gpt-4o",
+                         "provider": "openai", "description": ""}
+    assert models[1] == {"modelId": "claude:claude-3-opus", "name": "claude-3-opus",
+                         "provider": "claude", "description": ""}
+    # no colon → provider = owned_by, name = full id
+    assert models[2] == {"modelId": "gemini-pro", "name": "gemini-pro",
+                         "provider": "google", "description": ""}
+
+    # — Case 2: no colon, no owned_by → fallback provider "gateway" —
+    with patch.object(b._client, "get", return_value=mk([
+        {"id": "my-custom-model"},
+    ])):
+        models2 = b._fetch_gateway_models()
+    assert models2[0]["provider"] == "gateway"
+    assert models2[0]["name"] == "my-custom-model"
+
+    # — Case 3: HTTP error → empty list, no exception —
+    err_resp = MagicMock()
+    err_resp.json.side_effect = Exception("server error")
+    with patch.object(b._client, "get", return_value=err_resp):
+        models3 = b._fetch_gateway_models()
+    assert models3 == []
+
+    # — Case 4: empty data →
+    with patch.object(b._client, "get", return_value=mk([])):
+        models4 = b._fetch_gateway_models()
+    assert models4 == []
+
+    print("fetch_gateway_models: OK")
+
+
+def test_read_config_models() -> None:
+    """Parse config.yaml model/custom_providers/fallback_providers."""
+    import tempfile
+    import shutil
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QCoreApplication
+
+    app = QCoreApplication.instance() or QCoreApplication(sys.argv)
+    from backend.hermes_backend import HermesBackend
+
+    b = HermesBackend()
+
+    # Use a temp dir as hermesHome with a config.yaml
+    tmpdir = tempfile.mkdtemp()
+    try:
+        b._hermesHome = tmpdir
+
+        # ── Case 1: Full config with model + custom_providers + fallbacks ──
+        config_yaml = textwrap.dedent("""\
+            model:
+              base_url: http://localhost:8085/v1
+              default: GLM5_ops
+              provider: custom
+              api_key: sk-test
+            custom_providers:
+              - base_url: http://localhost:8081/v1
+                model: Qwen3-Model.gguf
+                models:
+                  local-model:
+                    context_length: 65536
+                name: local
+              - api_key: sk-test2
+                base_url: http://localhost:8085/v1
+                model: GLM5_ops
+                name: local2
+            fallback_providers:
+              - model: GLM5_ops
+                provider: local2
+        """)
+        with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
+            f.write(config_yaml)
+
+        models = b._read_config_models()
+        ids = [m["modelId"] for m in models]
+
+        # Primary model resolved: provider "custom" + base_url matches local2
+        assert "local2:GLM5_ops" in ids, f"Expected local2:GLM5_ops in {ids}"
+
+        # Custom provider "local" with its model + extra models key
+        assert "local:Qwen3-Model.gguf" in ids, f"Expected local:Qwen3-Model.gguf in {ids}"
+        assert "local:local-model" in ids, f"Expected local:local-model in {ids}"
+
+        # Custom provider "local2" with its model
+        assert "local2:GLM5_ops" in ids, f"Expected local2:GLM5_ops in {ids}"
+
+        # Fallback provider
+        # local2:GLM5_ops already seen → no duplicate
+        assert ids.count("local2:GLM5_ops") == 1, "Should not duplicate local2:GLM5_ops"
+
+        # Verify shape of one entry
+        glm_entry = next(m for m in models if m["modelId"] == "local2:GLM5_ops")
+        assert glm_entry["name"] == "GLM5_ops"
+        assert glm_entry["provider"] == "local2"
+
+        # ── Case 2: Empty config.yaml ──
+        with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
+            f.write("")
+        assert b._read_config_models() == []
+
+        # ── Case 3: No config file ──
+        os.unlink(os.path.join(tmpdir, "config.yaml"))
+        assert b._read_config_models() == []
+
+        # ── Case 4: model as string (not dict) ──
+        with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
+            f.write("model: some-model\n")
+        assert b._read_config_models() == []
+
+        # ── Case 5: _resolve_provider_label ──
+        cfg = {
+            "custom_providers": [
+                {"name": "my-ollama", "base_url": "http://localhost:11434/v1"},
+            ]
+        }
+        assert HermesBackend._resolve_provider_label("my-ollama", cfg, "") == "my-ollama"
+        assert HermesBackend._resolve_provider_label("custom", cfg, "http://localhost:11434/v1") == "my-ollama"
+        assert HermesBackend._resolve_provider_label("unknown", cfg, "") == "unknown"
+        assert HermesBackend._resolve_provider_label("custom", {}, "") == "custom"
+
+        print("read_config_models: OK")
+
+    finally:
+        shutil.rmtree(tmpdir)
+
+
 if __name__ == "__main__":
     test_acp_client()
     test_backend_mapping()
+    test_fetch_gateway_models()
+    test_read_config_models()
     print("acp_test: OK")

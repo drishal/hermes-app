@@ -17,6 +17,7 @@ import threading
 import time
 
 import httpx
+import yaml
 from PySide6.QtCore import (
     Property,
     QObject,
@@ -247,6 +248,10 @@ class HermesBackend(QObject):
             ok = data.get("status") in ("ok", "healthy")
             if data.get("model") and not (self._acp and self._acp.is_alive()):
                 self._set_current_model(data["model"])
+            # Pre-populate models when the gateway is reachable and no ACP is
+            # running — the picker needs them at startup.
+            if ok and not (self._acp and self._acp.is_alive()) and not self._availableModels:
+                self.refreshModels()
         except Exception:
             pass
         # A live ACP subprocess can run turns without the gateway.
@@ -506,6 +511,285 @@ class HermesBackend(QObject):
         self._set_models(self._normalize_models(available))
         if current:
             self._set_current_model(current.split(":")[-1])
+
+    def _fetch_gateway_models(self) -> list[dict]:
+        """Query GET /v1/models from the gateway and return normalized rows.
+
+        Returns a list of {modelId, name, provider, description} dicts, or []
+        on any HTTP/parse error.
+        """
+        try:
+            r = self._client.get(
+                self._apiBaseUrl + "/v1/models",
+                headers=self._headers(),
+                timeout=5.0,
+            )
+            data = r.json()
+        except Exception:
+            log.debug("gateway /v1/models query failed")
+            return []
+        raw = data.get("data") or []
+        out: list[dict] = []
+        for m in raw:
+            mid = str(m.get("id") or "")
+            if not mid:
+                continue
+            # Derive provider from the first colon segment in the id, else
+            # fall back to owned_by or "gateway".
+            if ":" in mid:
+                provider = mid.split(":", 1)[0]
+                name = mid.split(":", 1)[1]
+            else:
+                provider = str(m.get("owned_by") or "gateway")
+                name = mid
+            out.append({
+                "modelId": mid,
+                "name": name,
+                "provider": provider,
+                "description": "",
+            })
+        return out
+
+    def _read_config_models(self) -> list[dict]:
+        """Read models directly from the Hermes config.yaml.
+
+        Parses the ``model`` section (default model + provider), plus
+        ``custom_providers`` and ``fallback_providers`` entries.  This is the
+        primary model-discovery path for the desktop app — it works without
+        a running gateway or ACP process, just from the local config file.
+
+        Returns a list of {modelId, name, provider, description} dicts.
+        """
+        config_path = os.path.join(
+            os.path.expanduser(self._hermesHome), "config.yaml"
+        )
+        try:
+            with open(config_path) as f:
+                cfg = yaml.safe_load(f)
+        except (OSError, ValueError, yaml.YAMLError):
+            log.debug("config.yaml not readable at %s", config_path)
+            return []
+
+        if not isinstance(cfg, dict):
+            return []
+
+        out: list[dict] = []
+        seen_ids: set[str] = set()
+
+        # 1. Primary model section: model.default + model.provider
+        model_cfg = cfg.get("model")
+        if isinstance(model_cfg, dict):
+            default_model = str(model_cfg.get("default") or "").strip()
+            provider = str(model_cfg.get("provider") or "custom").strip()
+            base_url = str(model_cfg.get("base_url") or "").strip()
+            if default_model:
+                # Resolve provider name: custom_providers may have a name that
+                # matches the provider value; use it if found, else keep as-is.
+                provider_label = self._resolve_provider_label(
+                    provider, cfg, base_url
+                )
+                mid = f"{provider_label}:{default_model}"
+                if mid not in seen_ids:
+                    seen_ids.add(mid)
+                    out.append({
+                        "modelId": mid,
+                        "name": default_model,
+                        "provider": provider_label,
+                        "description": "Primary",
+                    })
+
+        # 2. custom_providers — each has base_url, optional model, optional
+        #    models dict with additional model ids.
+        custom_providers = cfg.get("custom_providers") or []
+        if isinstance(custom_providers, list):
+            for cp in custom_providers:
+                if not isinstance(cp, dict):
+                    continue
+                cp_name = str(cp.get("name") or "custom").strip()
+                cp_base = str(cp.get("base_url") or "").strip()
+                cp_model = str(cp.get("model") or "").strip()
+                cp_models = cp.get("models") or {}
+
+                # The provider-level default model
+                if cp_model:
+                    mid = f"{cp_name}:{cp_model}"
+                    if mid not in seen_ids:
+                        seen_ids.add(mid)
+                        out.append({
+                            "modelId": mid,
+                            "name": cp_model,
+                            "provider": cp_name,
+                            "description": (
+                                "Custom endpoint"
+                                if not cp_base
+                                else f"Custom endpoint • {cp_base}"
+                            ),
+                        })
+
+                # Additional named models under the provider's ``models`` key.
+                if isinstance(cp_models, dict):
+                    for model_id in cp_models:
+                        model_id = str(model_id).strip()
+                        if not model_id:
+                            continue
+                        mid = f"{cp_name}:{model_id}"
+                        if mid not in seen_ids:
+                            seen_ids.add(mid)
+                            out.append({
+                                "modelId": mid,
+                                "name": model_id,
+                                "provider": cp_name,
+                                "description": (
+                                    "Custom endpoint"
+                                    if not cp_base
+                                    else f"Custom endpoint • {cp_base}"
+                                ),
+                            })
+
+                # If no model info at all, probe the endpoint for live models.
+                if not cp_model and not cp_models and cp_base:
+                    probed = self._probe_provider_models(cp_name, cp_base, cp.get("api_key"))
+                    for m in probed:
+                        if m["modelId"] not in seen_ids:
+                            seen_ids.add(m["modelId"])
+                            out.append(m)
+
+        # 3. fallback_providers
+        fallbacks = cfg.get("fallback_providers") or []
+        if isinstance(fallbacks, list):
+            for idx, fb in enumerate(fallbacks, start=1):
+                if not isinstance(fb, dict):
+                    continue
+                fb_provider = str(fb.get("provider") or "custom").strip()
+                fb_model = str(fb.get("model") or "").strip()
+                if fb_model:
+                    provider_label = self._resolve_provider_label(
+                        fb_provider, cfg, ""
+                    )
+                    mid = f"{provider_label}:{fb_model}"
+                    if mid not in seen_ids:
+                        seen_ids.add(mid)
+                        out.append({
+                            "modelId": mid,
+                            "name": fb_model,
+                            "provider": provider_label,
+                            "description": f"Fallback {idx}",
+                        })
+
+        # 4. Probe custom provider base_urls for live model lists.
+        # Only probe providers that didn't already have static model info.
+        if isinstance(custom_providers, list):
+            for cp in custom_providers:
+                if not isinstance(cp, dict):
+                    continue
+                cp_name = str(cp.get("name") or "custom").strip()
+                cp_base = str(cp.get("base_url") or "").strip()
+                if not cp_base:
+                    continue
+                # Skip providers we already populated with static models
+                has_static = bool(
+                    cp.get("model") or (isinstance(cp.get("models"), dict) and cp.get("models"))
+                )
+                if has_static:
+                    # Still probe to find extra models the static list missed
+                    probed = self._probe_provider_models(
+                        cp_name, cp_base, cp.get("api_key")
+                    )
+                    for m in probed:
+                        if m["modelId"] not in seen_ids:
+                            seen_ids.add(m["modelId"])
+                            out.append(m)
+
+        return out
+
+    @staticmethod
+    def _resolve_provider_label(provider: str, cfg: dict, base_url: str) -> str:
+        """Map a provider string to a display label.
+
+        If the provider matches a custom_providers ``name``, use that name.
+        If the provider is ``custom`` and a base_url is set, label it
+        ``Custom endpoint``.  Otherwise return the provider as-is.
+        """
+        custom_providers = cfg.get("custom_providers") or []
+        if isinstance(custom_providers, list):
+            for cp in custom_providers:
+                if not isinstance(cp, dict):
+                    continue
+                cp_name = str(cp.get("name") or "").strip()
+                if cp_name and cp_name == provider:
+                    return cp_name
+        # If the provider is "custom" (the generic config.yaml value), use a
+        # friendlier label. The actual provider name is extracted from
+        # custom_providers matching on base_url.
+        if provider == "custom" and base_url:
+            for cp in custom_providers:
+                if not isinstance(cp, dict):
+                    continue
+                if str(cp.get("base_url") or "").strip() == base_url:
+                    return str(cp.get("name") or "custom").strip()
+        return provider
+
+    def _probe_provider_models(
+        self, provider_name: str, base_url: str, api_key: str | None = None
+    ) -> list[dict]:
+        """Query a custom provider's GET /v1/models endpoint.
+
+        Returns normalized model rows on success, or [] on any error.
+        """
+        headers: dict = {}
+        key = str(api_key or "").strip()
+        if not key:
+            # Try the .env file for a matching key
+            key = self._provider_env_key(provider_name)
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        try:
+            r = self._client.get(
+                base_url.rstrip("/") + "/models",
+                headers=headers if headers else None,
+                timeout=5.0,
+            )
+            data = r.json()
+        except Exception:
+            log.debug("provider %s /models probe failed", provider_name)
+            return []
+        raw = data.get("data") or []
+        out: list[dict] = []
+        for m in raw:
+            mid = str(m.get("id") or "")
+            if not mid:
+                continue
+            # Strip the provider prefix if present (e.g. "local:my-model")
+            if ":" in mid:
+                name = mid.split(":", 1)[1]
+            else:
+                name = mid
+            model_id = f"{provider_name}:{mid}"
+            out.append({
+                "modelId": model_id,
+                "name": name,
+                "provider": provider_name,
+                "description": f"Custom endpoint • {base_url}",
+            })
+        return out
+
+    def _provider_env_key(self, provider_name: str) -> str:
+        """Try to find an API key in the Hermes .env for a custom provider."""
+        env_path = os.path.join(
+            os.path.expanduser(self._hermesHome), ".env"
+        )
+        try:
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    if provider_name.upper() in k.upper():
+                        return v.strip().strip('"').strip("'")
+        except OSError:
+            pass
+        return ""
 
     @staticmethod
     def _normalize_models(available: list) -> list:
@@ -1120,31 +1404,47 @@ class HermesBackend(QObject):
 
     @Slot()
     def refreshModels(self) -> None:
-        """Populate availableModels before the first run if needed.
+        """Populate availableModels from config.yaml, ACP, or gateway fallback.
 
-        Creates a fresh ACP session when none exists; otherwise the list from
-        the existing session is already reflected in availableModels."""
-        if self._availableModels:
-            return
+        Discovery order:
+          1. Read config.yaml directly (model section + custom_providers +
+             fallback_providers).  This always works — no running process
+             needed.
+          2. Try ACP — a running hermes-acp session carries availableModels.
+          3. Fall back to the gateway's GET /v1/models endpoint.
+
+        ACP/gateway results supplement the config list (they may include
+        models from connected OAuth providers that aren't in config.yaml)
+        but never replace config-sourced entries.
+        """
         if self._modelsLoading:
             return
         self._set_models_loading(True)
 
         def work():
             try:
-                client = self._ensure_acp()
-                if self._currentSessionId:
-                    # Already have a session; models were fetched when it was
-                    # created and are stored in availableModels.
-                    return
-                res = client.new_session()
-                sid = res.get("sessionId") or ""
-                if sid:
-                    self._set_current_session(sid)
-                    self._acpLoadedSessions.add(sid)
-                    self._apply_acp_models(client, sid, res.get("models") or {})
-            except Exception:
-                log.exception("refreshModels failed")
+                config_models = self._read_config_models()
+                if config_models:
+                    self._set_models(config_models)
+
+                # Try ACP — may add models from live agent sessions.
+                try:
+                    client = self._ensure_acp()
+                    if not self._currentSessionId:
+                        res = client.new_session()
+                        sid = res.get("sessionId") or ""
+                        if sid:
+                            self._set_current_session(sid)
+                            self._acpLoadedSessions.add(sid)
+                            self._apply_acp_models(client, sid, res.get("models") or {})
+                except Exception:
+                    log.debug("ACP model discovery failed — falling back to gateway")
+
+                # Fall back to gateway if ACP didn't populate the list.
+                if not self._availableModels:
+                    gw_models = self._fetch_gateway_models()
+                    if gw_models:
+                        self._set_models(gw_models)
             finally:
                 self._set_models_loading(False)
 
