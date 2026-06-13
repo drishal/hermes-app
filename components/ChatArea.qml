@@ -70,6 +70,7 @@ Item {
     function submit() {
         const text = chatInput.text
         if (!text.trim() && root.attachedImages.length === 0) return false
+        root._modelPickerOpen = false
         const parsed = Sc.parse(text.trim())
         if (parsed) {
             runCommand(parsed)
@@ -140,6 +141,9 @@ Item {
     // ── Slash-command autocomplete state ───────────────────────
     property var _slashSuggestions: []
     property int _slashSel: 0
+
+    // ── Model picker state ────────────────────────────────────
+    property bool _modelPickerOpen: false
 
     function applySlash(name) {
         chatInput.text = "/" + name + " "
@@ -560,14 +564,11 @@ Item {
                         selectionColor: Theme.primary
                         selectedTextColor: Theme.onPrimary
                         wrapMode: TextEdit.Wrap
-                        selectByMouse: true
-                        textFormat: TextEdit.PlainText
-                        tabStopDistance: 32
-
                         // Recompute slash suggestions as the command word is typed.
                         onTextChanged: {
                             root._slashSuggestions = Sc.suggest(chatInput.text)
                             root._slashSel = 0
+                            if (root._slashSuggestions.length > 0) root._modelPickerOpen = false
                         }
 
                         Keys.onPressed: event => {
@@ -588,9 +589,14 @@ Item {
                                 root.applySlash(sugg[root._slashSel].name)
                                 return
                             }
-                            if (event.key === Qt.Key_Escape && hasSugg) {
-                                event.accepted = true
-                                root._slashSuggestions = []
+                            if (event.key === Qt.Key_Escape) {
+                                if (hasSugg) {
+                                    event.accepted = true
+                                    root._slashSuggestions = []
+                                } else if (root._modelPickerOpen) {
+                                    event.accepted = true
+                                    root._modelPickerOpen = false
+                                }
                                 return
                             }
                             if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
@@ -605,7 +611,8 @@ Item {
                                 } else if (root.submit()) {
                                     chatInput.text = ""
                                 }
-                            } else if (event.key === Qt.Key_V
+                            }
+                            if (event.key === Qt.Key_V
                                        && (event.modifiers & Qt.ControlModifier)) {
                                 // Try to pull an image off the clipboard alongside
                                 // the regular text paste. If the clipboard has only
@@ -688,7 +695,7 @@ Item {
 
                                 StyledText {
                                     id: modelChipText
-                                    text: hermesService.currentModel || hermesService.selectedModel || ""
+                                    text: hermesService.activeModelName || hermesService.currentModel || hermesService.selectedModel || ""
                                     color: Theme.surfaceTextMedium
                                     font.pixelSize: Theme.fontSizeSmall
                                     anchors.verticalCenter: parent.verticalCenter
@@ -703,10 +710,13 @@ Item {
 
                             MouseArea {
                                 id: modelMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.settingsRequested()
+                                onClicked: {
+                                    root._modelPickerOpen = !root._modelPickerOpen
+                                    if (root._modelPickerOpen) {
+                                        root._slashSuggestions = []
+                                        hermesService.refreshModels()
+                                    }
+                                }
                             }
                         }
 
@@ -850,6 +860,21 @@ Item {
                         }
                     }
                 }
+            }
+            // ── Model picker dropdown ─────────────────────────
+            ModelPicker {
+                id: modelPicker
+                hermesService: root.hermesService
+                open: root._modelPickerOpen
+                width: root.contentWidth
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: inputRow.top
+                anchors.bottomMargin: Theme.spacingS
+                onModelSelected: modelId => {
+                    hermesService.selectModel(modelId)
+                    root._modelPickerOpen = false
+                }
+                onRefreshRequested: hermesService.refreshModels()
             }
 
             // ── Transient command-result toast ─────────────────

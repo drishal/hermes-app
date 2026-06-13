@@ -21,6 +21,22 @@ Item {
     readonly property bool connected: backend ? backend.connected : false
     readonly property string currentSessionId: backend ? backend.currentSessionId : ""
     readonly property string currentModel: backend ? backend.currentModel : ""
+    readonly property var availableModels: backend ? backend.availableModels : []
+    readonly property bool modelsLoading: backend ? backend.modelsLoading : false
+
+    // Friendly display name for the active model (looks it up in availableModels
+    // by bare name or modelId; falls back to currentModel).
+    readonly property string activeModelName: {
+        if (!backend) return ""
+        const m = backend.currentModel || ""
+        const list = backend.availableModels || []
+        for (let i = 0; i < list.length; i++) {
+            if (list[i].name === m || list[i].modelId === m
+                || (list[i].modelId || "").split(":").slice(1).join(":") === m)
+                return list[i].name
+        }
+        return m
+    }
     readonly property bool isRunning: backend ? backend.isRunning : false
     readonly property var lastUsage: backend ? backend.lastUsage : ({})
     readonly property var welcomeInfo: backend ? backend.welcomeInfo : ({})
@@ -44,8 +60,6 @@ Item {
     // rows at once leaves ListView with stale row positions (visible overlap
     // until something forces a relayout).
     property bool bulkLoading: false
-
-    // ── Methods the views call (forward to backend) ────────────
     function loadSessions() { if (backend) backend.loadSessions() }
     function loadMessages(sessionId) { if (backend) backend.loadMessages(sessionId) }
     function newChat() { if (backend) backend.newChat() }
@@ -54,6 +68,8 @@ Item {
     function resolveApproval(choice) { if (backend) backend.resolveApproval(choice) }
     function truncateTo(row) { if (backend) backend.truncateTo(row) }
     function resendFrom(row, text) { if (backend) backend.resendFrom(row, text) }
+    function selectModel(modelId) { if (backend) backend.selectModel(modelId) }
+    function refreshModels() { if (backend) backend.refreshModels() }
 
     Connections {
         target: root.backend

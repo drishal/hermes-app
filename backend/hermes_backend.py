@@ -67,6 +67,8 @@ class HermesBackend(QObject):
     lastErrorChanged = Signal()
     welcomeInfoChanged = Signal()
     configChanged = Signal()
+    availableModelsChanged = Signal()
+    modelsLoadingChanged = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -103,6 +105,8 @@ class HermesBackend(QObject):
         self._lastUsage: dict = {}
         self._lastError = ""
         self._welcomeInfo: dict = {}
+        self._availableModels: list = []
+        self._modelsLoading = False
 
         # SSE gating
         self._accepting = False
@@ -499,8 +503,43 @@ class HermesBackend(QObject):
                     except AcpError as e:
                         log.warning("session/set_model failed: %s", e)
                     break
+        self._set_models(self._normalize_models(available))
         if current:
             self._set_current_model(current.split(":")[-1])
+
+    @staticmethod
+    def _normalize_models(available: list) -> list:
+        """ACP ModelInfo → UI rows: {modelId, name, provider, description}.
+
+        The adapter encodes the provider into modelId ("<provider>:<model>") and
+        repeats it in description ("Provider: <Label> • <desc> • current"); pull
+        out a clean provider label and a description without that boilerplate."""
+        out = []
+        for m in available or []:
+            if not isinstance(m, dict):
+                continue
+            model_id = str(m.get("modelId") or "")
+            name = str(m.get("name") or model_id)
+            raw_desc = str(m.get("description") or "")
+            provider = ""
+            desc_bits = []
+            for part in raw_desc.split(" • "):
+                p = part.strip()
+                if not p or p.lower() == "current":
+                    continue
+                if p.lower().startswith("provider:"):
+                    provider = p.split(":", 1)[1].strip()
+                else:
+                    desc_bits.append(p)
+            if not provider and ":" in model_id:
+                provider = model_id.split(":", 1)[0]
+            out.append({
+                "modelId": model_id,
+                "name": name,
+                "provider": provider,
+                "description": " • ".join(desc_bits),
+            })
+        return out
 
     def _last_assistant_text(self) -> str:
         with self._lock:
@@ -1053,6 +1092,63 @@ class HermesBackend(QObject):
         self.checkHealth()
         self.loadSessions()
         self.loadWelcomeInfo()
+    # ───────────────────────────────────────────────────────────
+    #  Model selection
+    # ───────────────────────────────────────────────────────────
+    @Slot(str)
+    def selectModel(self, model_id: str) -> None:
+        """Choose a model from the UI picker.
+
+        Updates the persisted setting and, if a session is active, asks the
+        ACP adapter to switch to it immediately. model_id is the full
+        provider:model string from availableModels."""
+        if not model_id:
+            return
+        self._selectedModel = model_id
+        self._save_settings()
+        self.configChanged.emit()
+        self._set_current_model(model_id.split(":")[-1])
+
+        sid = self._currentSessionId
+        if sid and self._acp and self._acp.is_alive():
+            def work():
+                try:
+                    self._acp.set_model(sid, model_id)
+                except AcpError as e:
+                    log.warning("session/set_model failed: %s", e)
+            self._spawn(work)
+
+    @Slot()
+    def refreshModels(self) -> None:
+        """Populate availableModels before the first run if needed.
+
+        Creates a fresh ACP session when none exists; otherwise the list from
+        the existing session is already reflected in availableModels."""
+        if self._availableModels:
+            return
+        if self._modelsLoading:
+            return
+        self._set_models_loading(True)
+
+        def work():
+            try:
+                client = self._ensure_acp()
+                if self._currentSessionId:
+                    # Already have a session; models were fetched when it was
+                    # created and are stored in availableModels.
+                    return
+                res = client.new_session()
+                sid = res.get("sessionId") or ""
+                if sid:
+                    self._set_current_session(sid)
+                    self._acpLoadedSessions.add(sid)
+                    self._apply_acp_models(client, sid, res.get("models") or {})
+            except Exception:
+                log.exception("refreshModels failed")
+            finally:
+                self._set_models_loading(False)
+
+        self._spawn(work)
 
     # ───────────────────────────────────────────────────────────
     #  Append helper
@@ -1080,6 +1176,16 @@ class HermesBackend(QObject):
         if v != self._currentModel:
             self._currentModel = v
             self._gui(self.currentModelChanged.emit)
+
+    def _set_models(self, v: list):
+        if v != self._availableModels:
+            self._availableModels = v
+            self._gui(self.availableModelsChanged.emit)
+
+    def _set_models_loading(self, v: bool):
+        if v != self._modelsLoading:
+            self._modelsLoading = v
+            self._gui(self.modelsLoadingChanged.emit)
 
     def _set_running(self, v: bool):
         if v != self._isRunning:
@@ -1114,6 +1220,8 @@ class HermesBackend(QObject):
     connected = Property(bool, lambda s: s._connected, notify=connectedChanged)
     currentSessionId = Property(str, lambda s: s._currentSessionId, notify=currentSessionIdChanged)
     currentModel = Property(str, lambda s: s._currentModel, notify=currentModelChanged)
+    availableModels = Property("QVariant", lambda s: s._availableModels, notify=availableModelsChanged)
+    modelsLoading = Property(bool, lambda s: s._modelsLoading, notify=modelsLoadingChanged)
     isRunning = Property(bool, lambda s: s._isRunning, notify=isRunningChanged)
     currentRunId = Property(str, lambda s: s._currentRunId, notify=currentRunIdChanged)
     lastUsage = Property("QVariant", lambda s: s._lastUsage, notify=lastUsageChanged)
