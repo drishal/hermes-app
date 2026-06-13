@@ -21,6 +21,10 @@ Item {
         return n
     }
 
+    // Match the chat's centered max-width column so the dashboard doesn't run
+    // edge-to-edge on wide windows (see ChatArea.qml contentMaxWidth).
+    readonly property int contentMaxWidth: 800
+
     Flickable {
         anchors.fill: parent
         anchors.margins: Theme.spacingM
@@ -31,8 +35,8 @@ Item {
 
         Column {
             id: contentCol
-            anchors.left: parent.left
-            anchors.right: parent.right
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(parent.width, root.contentMaxWidth)
             anchors.top: parent.top
             anchors.topMargin: Theme.spacingL
             spacing: Theme.spacingL
