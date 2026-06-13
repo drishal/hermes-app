@@ -40,7 +40,8 @@ QML views ──bind──► ListModels ──mirrored by──► HermesServic
   the backend directly — they bind to `hermesService`.
 - **Context properties** set in `main.py`: `hermesBackend`, `Platform`
   (`platform_bridge.py` — clipboard / image paste / Pygments), and
-  `stylixColors` (parsed `colors.json` or `null`).
+  `stylixColors` (a `base00…` palette from `theme_palette.load_palette()`, or
+  `null` — see **Theming**).
 - **Message rows** are plain dicts with a stable set of roles (see
   `db._row`). `type` selects the delegate in `ChatArea.qml`'s `Loader`:
   `user | assistant | thinking | tool_call | tool_result | approval`.
@@ -145,10 +146,18 @@ Supporting rules:
 
 `import QtCore` / `StandardPaths` is **not available** in the PySide6 build this
 targets — importing it breaks the `Theme` singleton and cascades to every
-component. So colours come in through a context property: `main.py` reads
-`~/.config/HermesApp/colors.json` and sets `stylixColors`; `Theme.qml` reads
-that root context property in `Component.onCompleted` and overrides its gruvbox
-defaults. Keep `Theme` free of QtCore.
+component. So colours come in through a context property: `backend/theme_palette.py`
+(`load_palette()`) resolves a base16/base24 palette and `main.py` sets it as
+`stylixColors`; `Theme.qml` reads that root context property in
+`Component.onCompleted` and overrides its gruvbox defaults. Keep `Theme` free of
+QtCore.
+
+Palette resolution order (first hit wins): `themePath` in `settings.json` →
+`~/.config/HermesApp/theme.{yaml,yml}` → `~/.config/HermesApp/colors.json`. The
+scheme parser is regex-only (no YAML dep) — it just picks `baseNN: <6 hex>`
+lines, so the tinted-theming `palette:` form and the legacy flat form both work.
+`stylixColors` is still the context-property name (it's just a `base00…` dict);
+`Theme.qml` is unchanged. Applied at startup only.
 
 ## Provider / content quirks
 

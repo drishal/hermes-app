@@ -40,6 +40,9 @@ DEFAULTS = {
     # gateway /v1/runs SSE path remains as automatic fallback when the
     # hermes-acp binary is missing or fails to start.
     "acpCommand": "hermes-acp",
+    # Optional path to a base16/base24 scheme (YAML or JSON) for the UI palette.
+    # See backend/theme_palette.py for the resolution order; applied at startup.
+    "themePath": "",
 }
 
 
@@ -77,6 +80,7 @@ class HermesBackend(QObject):
         self._hermesHome = s["hermesHome"]
         self._selectedModel = s["selectedModel"]
         self._acpCommand = s["acpCommand"]
+        self._themePath = s["themePath"]
         self._envApiKey = ""
 
         # ACP run transport (lazily spawned on first send)
@@ -152,6 +156,7 @@ class HermesBackend(QObject):
                         "hermesHome": self._hermesHome,
                         "selectedModel": self._selectedModel,
                         "acpCommand": self._acpCommand,
+                        "themePath": self._themePath,
                     },
                     f,
                     indent=2,

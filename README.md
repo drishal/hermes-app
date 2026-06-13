@@ -17,8 +17,10 @@ shelling for core features, no desktop-shell dependency.
 - **Approvals** inline (allow once / allow for session / deny)
 - **Session sidebar**, **command palette** (`Ctrl+K`), **tray icon** + desktop
   notifications when the window is unfocused
-- **Theming** derived from a host palette (e.g. stylix) via
-  `~/.config/HermesApp/colors.json`, falling back to a bundled gruvbox scheme
+- **Theming** from any base16/base24 scheme — drop a
+  `~/.config/HermesApp/theme.yaml`, point `themePath` at a stylix-managed
+  scheme in your dotfiles, or let the home-manager module write
+  `~/.config/HermesApp/colors.json`; falls back to a bundled gruvbox scheme
 - **Image paste** — paste a screenshot to attach it to the next message
 
 ## Requirements
@@ -68,10 +70,21 @@ Stored at `~/.config/HermesApp/settings.json`.
 
 ### Theming
 
-If `~/.config/HermesApp/colors.json` exists (keys `base00`–`base0E`, hex
-strings), the app maps it onto its `Theme` tokens at startup. NixOS/Home-Manager
-users can generate it from the active stylix scheme; everyone else gets the
-gruvbox defaults baked into `qs/Common/Theme.qml`.
+The UI palette comes from a base16/base24 scheme, resolved at startup in this
+order (first hit wins; absent → the gruvbox defaults in `qs/Common/Theme.qml`):
+
+1. **`themePath`** in `settings.json` — point it anywhere, e.g. a stylix-managed
+   scheme YAML inside your dotfiles. `.json` is read as a base16 object, anything
+   else as a scheme YAML.
+2. **`~/.config/HermesApp/theme.yaml`** (or `.yml`) — just drop a standard
+   base16/base24 scheme file here (the tinted-theming `palette:` form or the
+   legacy flat form, with or without `#`).
+3. **`~/.config/HermesApp/colors.json`** — what the NixOS/Home-Manager module
+   writes from the active stylix scheme (keys `base00`–`base0E`, hex strings).
+
+Theme uses base16 slots `base00`–`base05`, `08`, `0A`–`0E`; base24's extra
+slots are ignored. Parsing needs no YAML dependency. Applied at startup —
+restart to pick up a change.
 
 ## Project layout
 
