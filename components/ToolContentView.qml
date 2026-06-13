@@ -31,6 +31,7 @@ Item {
         if (_type === "diff")  return diffBlock.height
         if (_type === "text")  return textLine.height + Theme.spacingS
         if (_type === "kv")    return kvList.height + Theme.spacingS
+        if (_type === "markdown") return mdContent.height + Theme.spacingS
         // "json" fallback
         return Math.min(jsonFallback.height, 320) + Theme.spacingS
     }
@@ -201,6 +202,19 @@ Item {
                 }
             }
         }
+    }
+
+    // ── Markdown (ACP tool previews: prose + fenced code) ─────
+    MessageContent {
+        id: mdContent
+        visible: root._type === "markdown"
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: Theme.spacingS
+        anchors.rightMargin: Theme.spacingS
+        anchors.top: parent.top
+        anchors.topMargin: Theme.spacingXS
+        text: visible && root.content ? (root.content.body || "") : ""
     }
 
     // ── JSON fallback (JsonView tree) ─────────────────────────

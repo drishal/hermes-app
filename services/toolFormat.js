@@ -461,14 +461,15 @@ function classifyCallContent(tool, rawArgs) {
     const args = _parseArgs(rawArgs)
     if (!args) {
         // The ACP run path sends a pre-formatted, human-readable preview string
-        // (e.g. "$ ls ~/Desktop\n…", "Searching past sessions for: …") rather
-        // than a JSON args dict. Feeding that to the JsonView tree renders an
-        // empty body, so show it as text — code (monospace, whitespace-
-        // preserving) when it looks like a shell command, plain text otherwise.
+        // — markdown prose, fenced code blocks ("```python\n…```"), headings —
+        // rather than a JSON args dict. Feeding that to the JsonView tree renders
+        // an empty body, and a bare text line collapses newlines/fences. Render
+        // it as markdown so code fences and line breaks survive; keep raw shell
+        // output ("$ …\n<output>") as a verbatim code block.
         const s = String(rawArgs).trim()
         if (!s) return { type: "json" }
         if (/^\$ /.test(s)) return { type: "code", language: "bash", body: s }
-        return { type: "text", body: s }
+        return { type: "markdown", body: s }
     }
     const t = String(tool || "").toLowerCase()
 
