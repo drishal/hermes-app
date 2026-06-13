@@ -43,6 +43,20 @@ class Platform(QObject):
         path = f"/tmp/hermes-paste-{int(time.time() * 1000)}.png"
         return path if img.save(path, "PNG") else ""
 
+    @Slot(result=str)
+    def pickImage(self) -> str:
+        """Open a native file dialog to attach an image; returns the chosen path
+        or "" if cancelled. Backs the composer's "+" attach button."""
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getOpenFileName(
+            None,
+            "Attach image",
+            os.path.expanduser("~"),
+            "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*)",
+        )
+        return path or ""
+
     @Slot(str, str, result=str)
     def highlightHtml(self, code: str, lang: str) -> str:
         """Monokai-styled HTML for a code block (inline styles, no class refs).

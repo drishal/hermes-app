@@ -180,6 +180,14 @@ Item {
         root.attachedImages = root.attachedImages.concat([{ path: path, name: name }])
     }
 
+    // Composer "+" button: pick an image via the native file dialog and attach.
+    function pickAttachment() {
+        const path = Platform.pickImage()
+        if (!path) return
+        const name = path.split("/").pop()
+        root.attachedImages = root.attachedImages.concat([{ path: path, name: name }])
+    }
+
     Column {
         anchors.fill: parent
         spacing: 0
@@ -385,8 +393,10 @@ Item {
                 }
 
                 StyledText {
+                    // Model now lives in the composer toolbar chip; the status
+                    // line just reflects connection / run state.
                     text: hermesService.connected
-                          ? (hermesService.isRunning ? "Running…" : hermesService.currentModel || "Ready")
+                          ? (hermesService.isRunning ? "Running…" : "Ready")
                           : "Disconnected"
                     color: hermesService.connected ? Theme.surfaceTextMedium : Theme.error
                     font.pixelSize: Theme.fontSizeSmall
@@ -513,9 +523,13 @@ Item {
                 width: root.contentWidth
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.top: parent.top
-                height: Math.min(140, Math.max(44, chatInput.implicitHeight + 20))
+                // Claude-style: the text sits on top and a toolbar (attach ·
+                // model · send) is pinned along the bottom. Height grows with
+                // the text up to a cap, plus the fixed toolbar band.
+                readonly property real textAreaHeight: Math.min(160, Math.max(24, chatInput.implicitHeight))
+                height: textAreaHeight + 60
                 color: Theme.surfaceContainerHigh
-                radius: Theme.cornerRadius
+                radius: Theme.cornerRadius * 1.4
                 border.width: 1
                 border.color: chatInput.activeFocus ? Theme.primary : Theme.outlineMedium
 
@@ -523,25 +537,16 @@ Item {
                     NumberAnimation { duration: 80; easing.type: Easing.OutCubic }
                 }
 
-            Rectangle {
-                id: inputField
-                anchors.left: parent.left
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
-                anchors.right: sendButton.left
-                anchors.margins: Theme.spacingXS
-                anchors.rightMargin: Theme.spacingXS
-                color: Theme.surfaceContainerHighest
-                radius: Theme.cornerRadius
-                border.width: chatInput.activeFocus ? 1 : 0
-                border.color: Theme.primary
-
+                // ── Text area ──────────────────────────────────
                 Flickable {
-                    anchors.fill: parent
-                    anchors.leftMargin: Theme.spacingS
-                    anchors.rightMargin: Theme.spacingS
-                    anchors.topMargin: 6
-                    anchors.bottomMargin: 6
+                    id: textFlick
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.leftMargin: Theme.spacingM
+                    anchors.rightMargin: Theme.spacingM
+                    anchors.topMargin: Theme.spacingM
+                    height: inputRow.textAreaHeight
                     contentWidth: width
                     contentHeight: chatInput.implicitHeight
                     clip: true
@@ -613,7 +618,7 @@ Item {
 
                         StyledText {
                             visible: chatInput.text.length === 0 && !chatInput.activeFocus
-                            text: "Message Hermes…   (Shift+Enter for newline)"
+                            text: "Message Hermes…"
                             color: Theme.surfaceTextMedium
                             font.pixelSize: Theme.fontSizeMedium
                             anchors.left: parent.left
@@ -621,89 +626,166 @@ Item {
                         }
                     }
                 }
-            }
 
-            Rectangle {
-                id: sendButton
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                anchors.rightMargin: Theme.spacingXS
-                anchors.bottomMargin: Theme.spacingXS
-                width: hermesService.isRunning ? 72 : 36
-                height: 36
-                radius: height / 2
-                color: {
-                    if (hermesService.isRunning) return Theme.error
-                    if (chatInput.text.trim()) return Theme.primary
-                    return Theme.surfaceVariant
-                }
+                // ── Bottom toolbar: attach · model · send ──────
+                Item {
+                    id: toolbar
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.leftMargin: Theme.spacingS
+                    anchors.rightMargin: Theme.spacingS
+                    anchors.bottomMargin: Theme.spacingS
+                    height: 36
 
-                Behavior on color { ColorAnimation { duration: 160 } }
+                    // Left: attach an image (native file picker).
+                    Rectangle {
+                        id: attachBtn
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 32
+                        height: 32
+                        radius: 16
+                        color: attachMouse.containsMouse ? Theme.surfaceHover : "transparent"
+                        border.width: 1
+                        border.color: Theme.outlineMedium
 
-                // Expanding "ping" ring while a run is active.
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: parent.width
-                    height: parent.height
-                    radius: height / 2
-                    color: "transparent"
-                    border.width: 2
-                    border.color: Theme.error
-                    visible: hermesService.isRunning
-                    z: -1
-                    SequentialAnimation on opacity {
-                        running: hermesService.isRunning
-                        loops: Animation.Infinite
-                        NumberAnimation { from: 0.55; to: 0; duration: 1000; easing.type: Easing.OutCubic }
-                    }
-                    SequentialAnimation on scale {
-                        running: hermesService.isRunning
-                        loops: Animation.Infinite
-                        NumberAnimation { from: 0.85; to: 1.5; duration: 1000; easing.type: Easing.OutCubic }
-                    }
-                }
-
-                Row {
-                    anchors.centerIn: parent
-                    spacing: 4
-
-                    DankIcon {
-                        name: hermesService.isRunning ? "stop" : "arrow_upward"
-                        size: 20
-                        color: {
-                            if (hermesService.isRunning) return Theme.primaryText
-                            if (chatInput.text.trim()) return Theme.primaryText
-                            return Theme.surfaceTextMedium
+                        DankIcon {
+                            anchors.centerIn: parent
+                            name: "add"
+                            size: 18
+                            color: Theme.surfaceTextMedium
                         }
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
 
-                    StyledText {
-                        visible: hermesService.isRunning
-                        text: "Stop"
-                        color: Theme.primaryText
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.weight: Font.Medium
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (hermesService.isRunning) {
-                            hermesService.stopRun()
-                        } else if (root.submit()) {
-                            chatInput.text = ""
+                        MouseArea {
+                            id: attachMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.pickAttachment()
                         }
                     }
-                }
 
-                Behavior on width {
-                    NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                    // Right: model chip + send/stop.
+                    Row {
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Theme.spacingS
+
+                        Rectangle {
+                            id: modelChip
+                            visible: modelChipText.text.length > 0
+                            height: 28
+                            width: modelChipRow.implicitWidth + Theme.spacingS * 2
+                            radius: 14
+                            color: modelMouse.containsMouse ? Theme.surfaceHover : "transparent"
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            Row {
+                                id: modelChipRow
+                                anchors.centerIn: parent
+                                spacing: 3
+
+                                StyledText {
+                                    id: modelChipText
+                                    text: hermesService.currentModel || hermesService.selectedModel || ""
+                                    color: Theme.surfaceTextMedium
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                                DankIcon {
+                                    name: "expand_more"
+                                    size: 14
+                                    color: Theme.surfaceTextMedium
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                            }
+
+                            MouseArea {
+                                id: modelMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.settingsRequested()
+                            }
+                        }
+
+                        Rectangle {
+                            id: sendButton
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: hermesService.isRunning ? 72 : 32
+                            height: 32
+                            radius: height / 2
+                            color: {
+                                if (hermesService.isRunning) return Theme.error
+                                if (chatInput.text.trim()) return Theme.primary
+                                return Theme.surfaceVariant
+                            }
+                            Behavior on color { ColorAnimation { duration: 160 } }
+                            Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+
+                            // Expanding "ping" ring while a run is active.
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: parent.height
+                                height: parent.height
+                                radius: height / 2
+                                color: "transparent"
+                                border.width: 2
+                                border.color: Theme.error
+                                visible: hermesService.isRunning
+                                z: -1
+                                SequentialAnimation on opacity {
+                                    running: hermesService.isRunning
+                                    loops: Animation.Infinite
+                                    NumberAnimation { from: 0.55; to: 0; duration: 1000; easing.type: Easing.OutCubic }
+                                }
+                                SequentialAnimation on scale {
+                                    running: hermesService.isRunning
+                                    loops: Animation.Infinite
+                                    NumberAnimation { from: 0.85; to: 1.5; duration: 1000; easing.type: Easing.OutCubic }
+                                }
+                            }
+
+                            Row {
+                                anchors.centerIn: parent
+                                spacing: 4
+
+                                DankIcon {
+                                    name: hermesService.isRunning ? "stop" : "arrow_upward"
+                                    size: 18
+                                    color: {
+                                        if (hermesService.isRunning) return Theme.primaryText
+                                        if (chatInput.text.trim()) return Theme.primaryText
+                                        return Theme.surfaceTextMedium
+                                    }
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+
+                                StyledText {
+                                    visible: hermesService.isRunning
+                                    text: "Stop"
+                                    color: Theme.primaryText
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.weight: Font.Medium
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (hermesService.isRunning) {
+                                        hermesService.stopRun()
+                                    } else if (root.submit()) {
+                                        chatInput.text = ""
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-            }
             }
 
             // ── Slash-command autocomplete dropdown ────────────
